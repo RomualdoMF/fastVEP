@@ -531,7 +531,7 @@ for the parsing rules and the escaping table.
 | `--format` | On-disk format: `auto` (default), `osa` (v1), or `osa2` (v2). Every allele-level source has a v2 encoder, so `auto` builds the smaller, faster `.osa2` for all of them; gene- and interval-level sources have no v2 form and build `.oga`/`.osi` regardless. See [Choosing v1 vs v2](docs/SUPPLEMENTARY_ANNOTATIONS.md#choosing-v1-vs-v2---format) for when to force `osa`. | `auto` |
 | `--chunk-bits` | `custom_tsv` only. `.osa2` chunk width as a power of two (1–20; 12 = 4 kb, 20 = 1 Mb, the default). Lower it for wide records, since a lookup decompresses a whole chunk. | `20` |
 | `--key-transcript` / `--key-gene` | `custom_tsv` only. Names of the TSV columns holding the transcript / gene ID. The database is then keyed by (pos, ref, alt, gene, transcript) and `annotate` returns the entry for the transcript it is annotating (versions ignored); no match gives no annotation. A cell with several IDs joins them with `;`; any other cell with the same number of values is split the same way. First entry wins on a repeated key. | -- |
-| `--key-type` | `custom_tsv` only. ID namespace of the key columns, `ensembl` (default) or `refseq`; every ID is checked against it and it is recorded in `metadata.json`. | `ensembl` |
+| `--key-type` | `custom_tsv` only. ID namespace of the key columns: `ensembl` (default) or `refseq` (every ID is checked against it, and a version suffix is ignored when matching), or `symbol` for gene names such as SpliceAI's (any non-empty name, compared exactly, so `AL627309.1` and `AL627309.2` stay different genes). Recorded in `metadata.json`. | `ensembl` |
 
 ### `fastvep sa-convert`
 

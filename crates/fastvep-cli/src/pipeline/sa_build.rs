@@ -1079,7 +1079,12 @@ pub fn run_sa_build_v2_keyed(
                             all.sort_by_key(|r| (r.chrom_idx, r.position));
                             Box::new(all.into_iter().map(Ok))
                         };
-                    Box::new(fastvep_sa::keyed::Grouper::new(rows))
+                    // Symbols such as AL627309.1 / AL627309.2 are different genes.
+                    if spec.key_type == "symbol" {
+                        Box::new(fastvep_sa::keyed::Grouper::exact(rows))
+                    } else {
+                        Box::new(fastvep_sa::keyed::Grouper::new(rows))
+                    }
                 } else {
                     let rows =
                         custom_tsv::iter_custom_tsv(buf_reader, &chrom_map, &resolved_name, info_fields);

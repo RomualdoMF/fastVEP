@@ -1365,6 +1365,30 @@ fn keyed_custom_tsv_unkeyed_call_returns_first_entry() {
 }
 
 #[test]
+fn keyed_custom_tsv_with_gene_symbols_keeps_dotted_names_apart() {
+    // SpliceAI-style: one row per gene symbol; AL1.1 and AL1.2 are two genes.
+    let tsv = "#chr\tpos\tref\talt\tSYMBOL\tDS_AG\tDS_AL\n\
+        chr1\t100\tA\tG\tAL1.1\t0.10\t0.20\n\
+        chr1\t100\tA\tG\tAL1.2\t0.90\t0.80\n\
+        chr1\t100\tA\tG\tBRCA1\t0.00\t0.05\n";
+    let keys = SaBuildKeys {
+        gene: Some("SYMBOL".into()),
+        key_type: Some("symbol".into()),
+        ..Default::default()
+    };
+    let r = tsv_build(tsv, "custom_tsv", "auto", None, &keys).unwrap();
+    assert_eq!(r.key_scope(), (true, false));
+    // The key column is not a stored column: only the scores are listed for the CSQ.
+    assert_eq!(r.csq_columns(), ["SYMBOL", "DS_AG", "DS_AL"]);
+    let at = |g: &str| keyed_json(&r, Some(g), None);
+    assert!(at("AL1.2").unwrap().contains("\"DS_AG\":\"0.90\""));
+    assert!(at("AL1.1").unwrap().contains("\"DS_AG\":\"0.10\""));
+    assert!(at("brca1").unwrap().contains("\"DS_AL\":\"0.05\""), "case-insensitive");
+    assert!(at("AL1").is_none(), "no version stripping for symbols");
+    assert!(at("OTHER").is_none());
+}
+
+#[test]
 fn keyed_custom_tsv_checks_key_type_and_columns() {
     let refseq = SaBuildKeys {
         key_type: Some("refseq".into()),

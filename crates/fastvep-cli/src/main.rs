@@ -302,9 +302,10 @@ enum Commands {
         #[arg(long)]
         key_gene: Option<String>,
 
-        /// ID namespace of the key columns: `ensembl` (default) or `refseq`.
+        /// ID namespace of the key columns: `ensembl` (default), `refseq`, or `symbol`
+        /// (gene names, compared exactly with no version suffix, for `--key-gene`).
         /// Checked against every ID and recorded in metadata.json.
-        #[arg(long, value_parser = ["ensembl", "refseq"])]
+        #[arg(long, value_parser = ["ensembl", "refseq", "symbol"])]
         key_type: Option<String>,
 
         /// Suppress periodic progress output

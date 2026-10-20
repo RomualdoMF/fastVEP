@@ -43,10 +43,23 @@ fn same_id(a: &str, b: &str) -> bool {
     strip_version(a).eq_ignore_ascii_case(strip_version(b))
 }
 
-/// True when `id` looks like it belongs to `key_type`'s namespace.
+/// Whether two keys name the same thing under `key_type`.
+fn same_key(key_type: &str, a: &str, b: &str) -> bool {
+    if key_type == "symbol" {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        same_id(a, b)
+    }
+}
+
+/// True when `id` looks like it belongs to `key_type`'s namespace. `symbol`
+/// accepts any non-empty name and is compared exactly (no version suffix:
+/// `AL627309.1` and `AL627309.2` are different genes).
 pub fn id_matches_type(id: &str, is_transcript: bool, key_type: &str) -> bool {
     let ensembl = id.starts_with("ENS");
     match key_type {
+        // Gene symbols: any name will do.
+        "symbol" => !id.is_empty(),
         "ensembl" => ensembl,
         "refseq" if is_transcript => ["NM_", "NR_", "XM_", "XR_"]
             .iter()
@@ -98,7 +111,7 @@ pub fn select(
             None => true,
             Some((want_gene, want_tx)) => {
                 let ok = |enabled: bool, have: &str, want: Option<&str>| {
-                    !enabled || want.is_some_and(|w| !have.is_empty() && same_id(have, w))
+                    !enabled || want.is_some_and(|w| !have.is_empty() && same_key(&keys.key_type, have, w))
                 };
                 ok(keys.gene, gene, want_gene) && ok(keys.transcript, tx, want_tx)
             }
@@ -147,6 +160,8 @@ struct Group {
 /// from the first row of the group.
 pub struct Grouper<I> {
     rows: I,
+    /// Drop `.N` suffixes before telling two IDs apart (not for gene symbols).
+    strip_versions: bool,
     at: Option<(u16, u32)>,
     groups: Vec<Group>,
     ready: std::collections::VecDeque<crate::common::AnnotationRecord>,
@@ -155,8 +170,18 @@ pub struct Grouper<I> {
 
 impl<I> Grouper<I> {
     pub fn new(rows: I) -> Self {
+        Self::with_versions(rows, true)
+    }
+
+    /// As [`new`](Self::new) for gene symbols, which are compared exactly.
+    pub fn exact(rows: I) -> Self {
+        Self::with_versions(rows, false)
+    }
+
+    fn with_versions(rows: I, strip_versions: bool) -> Self {
         Self {
             rows,
+            strip_versions,
             at: None,
             groups: Vec::new(),
             ready: Default::default(),
@@ -201,9 +226,11 @@ impl<I> Grouper<I> {
         };
         let group = &mut self.groups[gi];
         for e in row.entries {
+            let strip = self.strip_versions;
             let norm = |v: &Option<String>| {
-                v.as_deref()
-                    .map_or(String::new(), |v| strip_version(v).to_ascii_lowercase())
+                v.as_deref().map_or(String::new(), |v| {
+                    (if strip { strip_version(v) } else { v }).to_ascii_lowercase()
+                })
             };
             if group.seen.insert((norm(&e.gene), norm(&e.transcript))) {
                 group.entries.push(e);
@@ -335,6 +362,35 @@ mod tests {
         let hit = |t| select(&recs[0].json, &k, Some((None, Some(t)))).unwrap();
         assert!(hit("T2").contains("\"v\":\"b\""), "first T2 wins");
         assert!(hit("T1").contains("\"s\":\"1\""), "shared from the first row");
+    }
+
+    #[test]
+    fn gene_symbols_are_compared_exactly() {
+        let symbols = KeyInfo { gene: true, transcript: false, key_type: "symbol".into(), columns: vec![] };
+        let blob = build_blob(
+            "{}",
+            &[
+                KeyedEntry { gene: Some("AL627309.1".into()), transcript: None, columns: "{\"v\":\"1\"}".into() },
+                KeyedEntry { gene: Some("AL627309.2".into()), transcript: None, columns: "{\"v\":\"2\"}".into() },
+            ],
+        );
+        // Under a version-stripping key type both would be the same gene.
+        let two = select(&blob, &symbols, Some((Some("AL627309.2"), None))).unwrap();
+        assert!(two.contains("\"v\":\"2\""), "{two}");
+        assert!(select(&blob, &symbols, Some((Some("al627309.1"), None))).unwrap().contains("\"v\":\"1\""));
+        assert!(select(&blob, &symbols, Some((Some("AL627309"), None))).is_none());
+        // The grouper keeps both, where ensembl-style IDs would have merged them.
+        let row = |g: &str| Ok(KeyedRow {
+            chrom_idx: 0, position: 1, ref_allele: "A".into(), alt_allele: "G".into(), shared: "{}".into(),
+            entries: vec![KeyedEntry { gene: Some(g.into()), transcript: None, columns: "{}".into() }],
+        });
+        let recs: Vec<_> = Grouper::exact(vec![row("AL627309.1"), row("AL627309.2")].into_iter())
+            .collect::<anyhow::Result<_>>().unwrap();
+        assert_eq!(recs[0].json.matches('\u{1e}').count(), 2);
+        let merged: Vec<_> = Grouper::new(vec![row("AL627309.1"), row("AL627309.2")].into_iter())
+            .collect::<anyhow::Result<_>>().unwrap();
+        assert_eq!(merged[0].json.matches('\u{1e}').count(), 1);
+        assert!(id_matches_type("AL627309.1", false, "symbol") && !id_matches_type("", false, "symbol"));
     }
 
     #[test]
