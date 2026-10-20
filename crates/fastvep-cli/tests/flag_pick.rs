@@ -72,6 +72,7 @@ fn write_vcf(dir: &Path) -> PathBuf {
 
 fn config(input: &Path, out: &Path) -> AnnotateConfig {
     AnnotateConfig {
+        hide_fv_info: false,
         input: input.to_string_lossy().into(),
         output: out.to_string_lossy().into(),
         gff3: vec![],
@@ -108,6 +109,7 @@ fn annotate(dir: &Path, flags: PickFlags, format: &str) -> String {
         format
     ));
     run_annotate(AnnotateConfig {
+        hide_fv_info: false,
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         pick: flags,
@@ -224,6 +226,7 @@ fn a_variant_with_one_transcript_is_still_flagged() {
         let vcf = write_vcf(dir.path());
         let out = dir.path().join("out.vcf");
         run_annotate(AnnotateConfig {
+        hide_fv_info: false,
             gff3: vec![gff3.to_string_lossy().into()],
             fasta: Some(fasta.to_string_lossy().into()),
             pick: flags_for(option),
@@ -257,6 +260,7 @@ fn a_lone_transcript_survives_a_reducing_pick_too() {
         let vcf = write_vcf(dir.path());
         let out = dir.path().join("out.vcf");
         run_annotate(AnnotateConfig {
+        hide_fv_info: false,
             gff3: vec![gff3.to_string_lossy().into()],
             fasta: Some(fasta.to_string_lossy().into()),
             pick: flags_for(option),

@@ -72,6 +72,7 @@ fn write_vcf(dir: &Path) -> PathBuf {
 
 fn config(input: &Path, out: &Path) -> AnnotateConfig {
     AnnotateConfig {
+        hide_fv_info: false,
         input: input.to_string_lossy().into(),
         output: out.to_string_lossy().into(),
         gff3: vec![],
@@ -130,6 +131,7 @@ fn annotate(dir: &Path, pick: bool, pick_order: Option<&str>) -> String {
         pick_order.unwrap_or("default")
     ));
     run_annotate(AnnotateConfig {
+        hide_fv_info: false,
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         pick: PickFlags {

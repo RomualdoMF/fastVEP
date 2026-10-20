@@ -8,7 +8,8 @@
 
 use fastvep_cache::annotation::{AnnotationProvider, AnnotationValue};
 use fastvep_cli::pipeline::{
-    run_sa_build, run_sa_build_format, run_sa_build_v2, source_supports_osa2,
+    run_sa_build, run_sa_build_format, run_sa_build_format_keyed, run_sa_build_v2,
+    source_supports_osa2, SaBuildKeys,
 };
 use fastvep_sa::reader::SaReader;
 use fastvep_sa::reader_v2::Osa2Reader;
@@ -1214,6 +1215,197 @@ fn custom_vcf_osa2_sorts_unsorted_input() {
             "{chrom}:{pos} should be present despite unsorted input"
         );
     }
+}
+
+// custom_tsv: header-named columns. Lists are joined by `;`; `sift` is parallel
+// to the transcripts, `cadd` is not. The second row repeats ENST2 (first one
+// must win) and adds ENST3.
+const KEYED_TSV: &str = "#chr\tpos\tref\talt\tgene\ttx\tsift\tcadd\n\
+    chr1\t100\tA\tG\tENSG1;ENSG1\tENST1;ENST2\t0.01;0.90\t12\n\
+    chr1\t100\tA\tG\tENSG1;ENSG2\tENST2;ENST3\t0.50;0.70\t99\n\
+    chr1\t200\tC\tT\tENSG1\tENST1\t0.3\t5\n";
+
+fn tsv_build(
+    body: &str,
+    source: &str,
+    format: &str,
+    chunk_bits: Option<u32>,
+    keys: &SaBuildKeys,
+) -> anyhow::Result<Osa2Reader> {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.tsv");
+    let out = dir.path().join("out");
+    fs::write(&input, body).unwrap();
+    run_sa_build_format_keyed(
+        format,
+        source,
+        input.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "GRCh38",
+        Some("tsv"),
+        &[],
+        chunk_bits,
+        keys,
+        false,
+    )?;
+    Osa2Reader::open(&out.with_extension("osa2"))
+}
+
+fn keys_of(tx: Option<&str>, gene: Option<&str>) -> SaBuildKeys {
+    SaBuildKeys {
+        transcript: tx.map(Into::into),
+        gene: gene.map(Into::into),
+        key_type: None,
+    }
+}
+
+fn both_keys() -> SaBuildKeys {
+    keys_of(Some("tx"), Some("gene"))
+}
+
+fn keyed_json(r: &Osa2Reader, gene: Option<&str>, tx: Option<&str>) -> Option<String> {
+    match r
+        .annotate_position_keyed("chr1", 100, "A", "G", gene, tx)
+        .unwrap()?
+    {
+        AnnotationValue::Json(j) => Some(j),
+        other => panic!("unexpected value: {other:?}"),
+    }
+}
+
+#[test]
+fn custom_tsv_stores_columns_and_drops_missing_values() {
+    let tsv = "chr\tpos\tref\talt\tscore\tlabel\n1\t10\tA\tG\t0.5\t.\n";
+    let r = tsv_build(tsv, "custom_tsv", "auto", None, &SaBuildKeys::default()).unwrap();
+    assert_eq!(r.json_key(), "tsv");
+    assert_eq!(r.key_scope(), (false, false));
+    assert_eq!(json_at(&r, "chr1", 10, "A", "G").unwrap(), "{\"score\":\"0.5\"}");
+}
+
+#[test]
+fn custom_tsv_sorts_unsorted_input() {
+    let tsv = "chr\tpos\tref\talt\tv\n2\t500\tA\tG\t3\n1\t9000000\tA\tG\t1\n1\t100\tA\tG\t2\n";
+    let r = tsv_build(tsv, "custom_tsv", "osa2", None, &SaBuildKeys::default()).unwrap();
+    for (chrom, pos) in [("chr1", 100u64), ("chr1", 9_000_000), ("chr2", 500)] {
+        assert!(json_at(&r, chrom, pos, "A", "G").is_some(), "{chrom}:{pos}");
+    }
+}
+
+#[test]
+fn custom_tsv_chunk_bits_overrides_the_chunk_width() {
+    let wide = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &SaBuildKeys::default()).unwrap();
+    let narrow = tsv_build(KEYED_TSV, "custom_tsv", "auto", Some(6), &SaBuildKeys::default()).unwrap();
+    // 100 and 200 share a 1 Mb chunk but not a 64-base one.
+    assert!(narrow.entry_count() > wide.entry_count());
+    assert!(json_at(&narrow, "chr1", 200, "C", "T").is_some());
+}
+
+#[test]
+fn custom_tsv_chunk_bits_out_of_range_is_rejected() {
+    for bits in [0u32, 21] {
+        let err = tsv_build(KEYED_TSV, "custom_tsv", "auto", Some(bits), &SaBuildKeys::default())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("--chunk-bits"), "{err}");
+    }
+}
+
+#[test]
+fn keyed_custom_tsv_matches_gene_and_transcript() {
+    let r = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &both_keys()).unwrap();
+    assert_eq!(r.key_scope(), (true, true));
+    // Each transcript gets its own parallel value; the shared one comes along.
+    let j = keyed_json(&r, Some("ENSG1"), Some("ENST1")).unwrap();
+    assert!(j.contains("\"sift\":\"0.01\"") && j.contains("\"cadd\":\"12\""), "{j}");
+    // Versions are ignored; a repeated key keeps the first row's value.
+    let j = keyed_json(&r, Some("ENSG1.4"), Some("ENST2.9")).unwrap();
+    assert!(j.contains("\"sift\":\"0.90\""), "first ENST2 wins: {j}");
+    assert!(keyed_json(&r, Some("ENSG2"), Some("ENST3")).unwrap().contains("0.70"));
+    // A row with a single ID needs no splitting.
+    let j = r.annotate_position_keyed("chr1", 200, "C", "T", Some("ENSG1"), Some("ENST1"));
+    assert!(matches!(j.unwrap(), Some(AnnotationValue::Json(j)) if j.contains("\"sift\":\"0.3\"")));
+}
+
+#[test]
+fn keyed_custom_tsv_records_its_columns_for_the_csq() {
+    let r = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &both_keys()).unwrap();
+    assert_eq!(r.csq_columns(), ["gene", "tx", "sift", "cadd"]);
+    // A column selection narrows the list; an unkeyed database lists none.
+    let plain = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &SaBuildKeys::default()).unwrap();
+    assert!(plain.csq_columns().is_empty());
+}
+
+#[test]
+fn keyed_custom_tsv_no_match_is_empty() {
+    let r = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &both_keys()).unwrap();
+    assert!(keyed_json(&r, Some("ENSG1"), Some("ENST9")).is_none());
+    // Right transcript, wrong gene: both keys must match.
+    assert!(keyed_json(&r, Some("ENSG2"), Some("ENST1")).is_none());
+    assert!(keyed_json(&r, None, Some("ENST1")).is_none());
+}
+
+#[test]
+fn keyed_custom_tsv_single_key_databases() {
+    let tx_only = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &keys_of(Some("tx"), None)).unwrap();
+    assert_eq!(tx_only.key_scope(), (false, true));
+    assert!(keyed_json(&tx_only, None, Some("ENST2")).is_some());
+
+    // Gene only: the first entry of the gene is kept.
+    let gene_only = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &keys_of(None, Some("gene"))).unwrap();
+    assert_eq!(gene_only.key_scope(), (true, false));
+    let j = keyed_json(&gene_only, Some("ENSG1"), None).unwrap();
+    assert!(j.contains("\"sift\":\"0.01\""), "{j}");
+}
+
+#[test]
+fn keyed_custom_tsv_unkeyed_call_returns_first_entry() {
+    let r = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &both_keys()).unwrap();
+    let j = json_at(&r, "chr1", 100, "A", "G").expect("first entry");
+    assert!(j.contains("\"sift\":\"0.01\""), "{j}");
+}
+
+#[test]
+fn keyed_custom_tsv_checks_key_type_and_columns() {
+    let refseq = SaBuildKeys {
+        key_type: Some("refseq".into()),
+        ..both_keys()
+    };
+    let err = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &refseq).err().unwrap();
+    assert!(err.to_string().contains("not a refseq ID"), "{err:#}");
+
+    let err = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &keys_of(Some("nope"), None))
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("'nope'"), "{err:#}");
+}
+
+#[test]
+fn unkeyed_database_ignores_gene_and_transcript() {
+    let r = tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &SaBuildKeys::default()).unwrap();
+    assert!(r
+        .annotate_position_keyed("chr1", 200, "C", "T", Some("G"), Some("T"))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn tsv_options_are_rejected_for_other_sources_and_formats() {
+    // dbnsfp and custom_vcf keep their behaviour: the new flags are not theirs.
+    for source in ["dbnsfp", "custom_vcf", "gnomad"] {
+        for (bits, keys) in [(Some(12), SaBuildKeys::default()), (None, both_keys())] {
+            let err = tsv_build(KEYED_TSV, source, "auto", bits, &keys).err().unwrap();
+            assert!(err.to_string().contains("custom_tsv"), "{source}: {err}");
+        }
+    }
+    let err = tsv_build(KEYED_TSV, "custom_tsv", "osa", None, &SaBuildKeys::default())
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains(".osa2 only"), "{err}");
+    let only_type = SaBuildKeys {
+        key_type: Some("refseq".into()),
+        ..Default::default()
+    };
+    assert!(tsv_build(KEYED_TSV, "custom_tsv", "auto", None, &only_type).is_err());
 }
 
 /// `--format auto` on `source`, returning `(built_osa, built_osa2, built_osi)`.

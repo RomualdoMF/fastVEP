@@ -819,6 +819,10 @@ impl AnnotationContext {
                         };
                         let mut results: Vec<(String, String)> = Vec::new();
                         for sa in &self.sa_providers {
+                            // Gene/transcript-keyed databases are queried per transcript below.
+                            if sa.key_scope() != (false, false) {
+                                continue;
+                            }
                             let (q_pos, q_ref, q_alt) = if sa.json_key() == "gnomad" {
                                 match &gnomad_norm {
                                     Some(n) => {
@@ -848,10 +852,39 @@ impl AnnotationContext {
                         allele_results.insert(alt_str, results);
                     }
                 }
+                let keyed: Vec<_> = self
+                    .sa_providers
+                    .iter()
+                    .filter(|sa| sa.key_scope() != (false, false))
+                    .collect();
+                let ref_start = vf.position.start;
                 for tv in &mut vf.transcript_variations {
                     for aa in &mut tv.allele_annotations {
-                        if let Some(results) = allele_results.get(&aa.allele.to_string()) {
+                        let alt_str = aa.allele.to_string();
+                        if let Some(results) = allele_results.get(&alt_str) {
                             aa.supplementary.extend(results.iter().cloned());
+                        }
+                        for sa in &keyed {
+                            match fastvep_cache::annotation::annotate_keyed(
+                                &***sa,
+                                chrom,
+                                ref_start,
+                                &ref_str,
+                                &alt_str,
+                                &tv.gene_id,
+                                tv.gene_symbol.as_deref(),
+                                &tv.transcript_id,
+                            ) {
+                                Ok(Some(ann)) => {
+                                    let json = match ann {
+                                        AnnotationValue::Json(j) | AnnotationValue::Positional(j) => j,
+                                        AnnotationValue::Interval(v) => format!("[{}]", v.join(",")),
+                                    };
+                                    aa.supplementary.push((sa.json_key().to_string(), json));
+                                }
+                                Ok(None) => {}
+                                Err(e) => sa_lookup_errors().record(sa.json_key(), &e),
+                            }
                         }
                     }
                 }

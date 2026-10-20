@@ -72,6 +72,34 @@ pub trait AnnotationProvider: Send + Sync {
         alt_allele: &str,
     ) -> Result<Option<AnnotationValue>>;
 
+    /// Which per-feature keys the database carries: `(gene, transcript)`.
+    /// Providers without keys keep the default and ignore gene/transcript.
+    fn key_scope(&self) -> (bool, bool) {
+        (false, false)
+    }
+
+    /// Annotation columns the VCF CSQ lists for this source, in input order
+    /// (empty when the database does not list them). Each CSQ entry gets one
+    /// column per name, filled from the record that matched the entry.
+    fn csq_columns(&self) -> &[String] {
+        &[]
+    }
+
+    /// As [`annotate_position`](Self::annotate_position), also matching the
+    /// gene and transcript IDs when the database is keyed. A keyed database
+    /// with no matching entry returns `None`.
+    fn annotate_position_keyed(
+        &self,
+        chrom: &str,
+        pos: u64,
+        ref_allele: &str,
+        alt_allele: &str,
+        _gene: Option<&str>,
+        _transcript: Option<&str>,
+    ) -> Result<Option<AnnotationValue>> {
+        self.annotate_position(chrom, pos, ref_allele, alt_allele)
+    }
+
     /// Pre-load data for a batch of positions on a chromosome.
     ///
     /// Called once per (provider, chromosome) before the parallel annotation
@@ -91,6 +119,39 @@ pub trait AnnotationProvider: Send + Sync {
     /// delivers the load-once behaviour.
     fn preload(&self, _chrom: &str, _positions: &[u64]) -> Result<()> {
         Ok(())
+    }
+}
+
+/// Keyed lookup for one (transcript, allele): tries the gene ID, then the gene
+/// symbol (RefSeq-keyed databases often carry symbols), then gives up.
+pub fn annotate_keyed(
+    sa: &dyn AnnotationProvider,
+    chrom: &str,
+    pos: u64,
+    ref_allele: &str,
+    alt_allele: &str,
+    gene_id: &str,
+    gene_symbol: Option<&str>,
+    transcript: &str,
+) -> Result<Option<AnnotationValue>> {
+    let hit = sa.annotate_position_keyed(
+        chrom,
+        pos,
+        ref_allele,
+        alt_allele,
+        Some(gene_id),
+        Some(transcript),
+    )?;
+    match (hit, gene_symbol, sa.key_scope().0) {
+        (None, Some(sym), true) => sa.annotate_position_keyed(
+            chrom,
+            pos,
+            ref_allele,
+            alt_allele,
+            Some(sym),
+            Some(transcript),
+        ),
+        (hit, _, _) => Ok(hit),
     }
 }
 

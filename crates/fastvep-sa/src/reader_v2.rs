@@ -199,6 +199,11 @@ pub struct Osa2Reader {
     /// a potentially multi-GB file. Startup diagnostic for issue #78.
     header_read_count: AtomicU64,
     metadata: Osa2Metadata,
+    /// Gene/transcript keys of the records, when the database is keyed.
+    keys: Option<crate::keyed::KeyInfo>,
+    /// Columns the CSQ lists (`csq_columns` in `metadata.json`); independent of
+    /// `keys`, so an unkeyed database can list them. Falls back to `keys.columns`.
+    csq_columns: Vec<String>,
     sa_metadata: SaMetadata,
     fields: Vec<Field>,
     /// Categorical string lookup tables per field.
@@ -284,10 +289,17 @@ impl Osa2Reader {
             read_entry_from(&mmap, &entries, &header_read_count, name)
         };
 
-        let metadata: Osa2Metadata = {
+        #[derive(serde::Deserialize)]
+        struct KeysProbe {
+            keys: Option<crate::keyed::KeyInfo>,
+            #[serde(default)]
+            csq_columns: Vec<String>,
+        }
+        let (metadata, keys, csq_columns): (Osa2Metadata, Option<crate::keyed::KeyInfo>, Vec<String>) = {
             let buf =
                 read_prelude("fastsa/metadata.json")?.context("Missing fastsa/metadata.json")?;
-            serde_json::from_slice(&buf)?
+            let probe: KeysProbe = serde_json::from_slice(&buf)?;
+            (serde_json::from_slice(&buf)?, probe.keys, probe.csq_columns)
         };
 
         let fields: Vec<Field> = {
@@ -341,6 +353,8 @@ impl Osa2Reader {
             chunk_load_count: AtomicU64::new(0),
             header_read_count,
             metadata,
+            keys,
+            csq_columns,
             sa_metadata,
             fields,
             string_tables,
@@ -573,6 +587,19 @@ impl Osa2Reader {
         ref_allele: &[u8],
         alt_allele: &[u8],
     ) -> Result<Option<String>> {
+        Ok(self
+            .locate(chrom, pos, ref_allele, alt_allele)?
+            .map(|(chunk, i)| chunk.reconstruct_json(i, &self.fields, &self.string_tables)))
+    }
+
+    /// The chunk holding a variant and its slot in it, without building the JSON.
+    fn locate(
+        &self,
+        chrom: &str,
+        pos: u32,
+        ref_allele: &[u8],
+        alt_allele: &[u8],
+    ) -> Result<Option<(Arc<Chunk>, usize)>> {
         let Some(chrom) = self.resolve_chrom(chrom) else {
             return Ok(None);
         };
@@ -618,11 +645,7 @@ impl Osa2Reader {
                 if i >= data_len {
                     return Ok(None);
                 }
-                Ok(Some(chunk.reconstruct_json(
-                    i,
-                    &self.fields,
-                    &self.string_tables,
-                )))
+                Ok(Some((chunk, i)))
             }
             None => Ok(None),
         }
@@ -704,6 +727,14 @@ impl AnnotationProvider for Osa2Reader {
             .map_err(|_| anyhow::anyhow!("Position {} exceeds u32::MAX", pos))?;
         match self.query(chrom, pos_u32, ref_allele.as_bytes(), alt_allele.as_bytes())? {
             Some(json) => {
+                // Keyed record, no keys supplied: the first entry stands in.
+                let json = match &self.keys {
+                    Some(keys) => match crate::keyed::select(&json, keys, None) {
+                        Some(j) => j,
+                        None => return Ok(None),
+                    },
+                    None => json,
+                };
                 if self.sa_metadata.is_positional {
                     Ok(Some(AnnotationValue::Positional(json)))
                 } else {
@@ -712,6 +743,46 @@ impl AnnotationProvider for Osa2Reader {
             }
             None => Ok(None),
         }
+    }
+
+    fn key_scope(&self) -> (bool, bool) {
+        self.keys.as_ref().map_or((false, false), |k| (k.gene, k.transcript))
+    }
+
+    fn csq_columns(&self) -> &[String] {
+        if !self.csq_columns.is_empty() {
+            return &self.csq_columns;
+        }
+        self.keys.as_ref().map_or(&[], |k| k.columns.as_slice())
+    }
+
+    fn annotate_position_keyed(
+        &self,
+        chrom: &str,
+        pos: u64,
+        ref_allele: &str,
+        alt_allele: &str,
+        gene: Option<&str>,
+        transcript: Option<&str>,
+    ) -> Result<Option<AnnotationValue>> {
+        let Some(keys) = &self.keys else {
+            return self.annotate_position(chrom, pos, ref_allele, alt_allele);
+        };
+        let pos_u32: u32 = pos
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Position {} exceeds u32::MAX", pos))?;
+        let Some((chunk, i)) =
+            self.locate(chrom, pos_u32, ref_allele.as_bytes(), alt_allele.as_bytes())?
+        else {
+            return Ok(None);
+        };
+        // Read the record in place: only the ID keys are compared until one matches.
+        Ok(chunk
+            .json_blobs
+            .as_ref()
+            .and_then(|b| b.get(i))
+            .and_then(|blob| crate::keyed::select(blob, keys, Some((gene, transcript))))
+            .map(AnnotationValue::Json))
     }
 
     fn preload(&self, chrom: &str, positions: &[u64]) -> Result<()> {

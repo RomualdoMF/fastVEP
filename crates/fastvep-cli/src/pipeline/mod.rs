@@ -25,9 +25,10 @@ pub use fastvep_annotate::pick::{
     parse_pick_order, PickCriterion, PickFlags, PickMode, PickScope, DEFAULT_PICK_ORDER,
 };
 pub use sa_build::{
-    run_sa_build, run_sa_build_format, run_sa_build_v2, run_sa_convert, source_from_json_key,
-    source_has_decomposed_osa2, source_supports_osa2, OSA2_DECOMPOSED_SOURCES,
-    OSA2_SUPPORTED_SOURCES,
+    run_sa_build, run_sa_build_format, run_sa_build_format_keyed, run_sa_build_v2,
+    run_sa_build_v2_keyed, source_from_json_key, source_has_decomposed_osa2,
+    source_supports_osa2, SaBuildKeys, OSA2_DECOMPOSED_SOURCES, OSA2_SUPPORTED_SOURCES,
+    run_sa_convert,
 };
 
 pub(crate) fn open_vcf_input_reader(input: &str) -> Result<Box<dyn io::Read>> {

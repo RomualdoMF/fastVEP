@@ -10,6 +10,114 @@ use std::fmt::Write as FmtWrite;
 /// EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|
 /// Amino_acids|Codons|Existing_variation|DISTANCE|STRAND|FLAGS
 pub fn format_csq(vf: &VariationFeature, fields: &[&str]) -> String {
+    format_csq_with_extra(vf, fields, &[])
+}
+
+/// Extra CSQ columns taken from one supplementary source: one column per source
+/// column (named by [`csq_extra_names`]), filled from the record that matched
+/// this transcript and allele (empty when none did).
+pub struct CsqExtra {
+    pub json_key: String,
+    /// Keys looked up in the source record, one per CSQ column.
+    pub columns: Vec<String>,
+    /// Header name of each column when it differs from its key (`SIGNIFICANCE`
+    /// for `significance`); empty means the key is the name.
+    pub labels: Vec<String>,
+    /// Put in front of every name (`CLINVAR_`); empty means names are used as
+    /// they are and only a clash adds `<json_key>_`.
+    pub prefix: String,
+    /// A gene-level source (OMIM, gnomAD constraint, ClinVar protein): the record
+    /// is the one filed under the entry's own gene symbol, not under its allele.
+    pub gene_level: bool,
+}
+
+impl CsqExtra {
+    /// Columns named exactly like their keys.
+    pub fn new(json_key: impl Into<String>, columns: Vec<String>) -> Self {
+        Self {
+            json_key: json_key.into(),
+            columns,
+            labels: Vec::new(),
+            prefix: String::new(),
+            gene_level: false,
+        }
+    }
+
+    /// A built-in source: `(label, key)` pairs from its `FV_*` field list, every
+    /// name written `<prefix><label>`.
+    fn prefixed(json_key: &str, prefix: &str, fields: &[(&str, &str)]) -> Self {
+        Self {
+            json_key: json_key.into(),
+            columns: fields.iter().map(|(_, key)| key.to_string()).collect(),
+            labels: fields.iter().map(|(label, _)| label.to_string()).collect(),
+            prefix: prefix.into(),
+            gene_level: false,
+        }
+    }
+
+    /// As [`prefixed`](Self::prefixed), for a gene-level source.
+    fn prefixed_gene(json_key: &str, prefix: &str, fields: &[(&str, &str)]) -> Self {
+        Self { gene_level: true, ..Self::prefixed(json_key, prefix, fields) }
+    }
+}
+
+/// CSQ columns for the loaded built-in sources that get them, each name written
+/// `<prefix><FV field>`: ClinVar `CLINVAR_`, gnomAD `GNOMAD_`, and the gene-level
+/// OMIM `OMIM_`, gnomAD constraint `GNOMAD_GENE_` and ClinVar protein
+/// `CLINVAR_PROTEIN_`. The gene-level ones leave out the `SYMBOL` that their
+/// `FV_*` field starts with: the CSQ entry already has it.
+pub fn builtin_csq_extras(sa_keys: &[String], gene_keys: &[String]) -> Vec<CsqExtra> {
+    let mut extras = Vec::new();
+    if sa_keys.iter().any(|k| k == "clinvar") {
+        extras.push(CsqExtra::prefixed("clinvar", "CLINVAR_", CLINVAR_FIELDS));
+    }
+    if sa_keys.iter().any(|k| k == "gnomad") {
+        extras.push(CsqExtra::prefixed("gnomad", "GNOMAD_", GNOMAD_FIELDS));
+    }
+    if gene_keys.iter().any(|k| k == "omim") {
+        extras.push(CsqExtra::prefixed_gene("omim", "OMIM_", OMIM_FIELDS));
+    }
+    if gene_keys.iter().any(|k| k == "gnomad_genes") {
+        extras.push(CsqExtra::prefixed_gene("gnomad_genes", "GNOMAD_GENE_", GNOMAD_GENE_FIELDS));
+    }
+    if gene_keys.iter().any(|k| k == "clinvar_protein") {
+        extras.push(CsqExtra::prefixed_gene("clinvar_protein", "CLINVAR_PROTEIN_", CLINVAR_PROTEIN_FIELDS));
+    }
+    extras
+}
+
+/// Header names of the `extras` columns, in column order.
+///
+/// A column keeps its own name. When that name is already a CSQ column (a
+/// standard one such as `APPRIS`, or one from an earlier source) it is written
+/// `<json_key>_<column>` instead, and `_2`, `_3`... if even that is taken, so
+/// the Format line never names two columns alike.
+pub fn csq_extra_names(fields: &[&str], extras: &[CsqExtra]) -> Vec<String> {
+    let mut taken: std::collections::HashSet<String> =
+        fields.iter().map(|f| f.to_string()).collect();
+    let mut names = Vec::new();
+    for extra in extras {
+        for (i, column) in extra.columns.iter().enumerate() {
+            let label = extra.labels.get(i).unwrap_or(column);
+            let mut name = format!("{}{}", extra.prefix, label);
+            if extra.prefix.is_empty() && taken.contains(&name) {
+                name = format!("{}_{}", extra.json_key, label);
+            }
+            let base = name.clone();
+            let mut n = 2;
+            while taken.contains(&name) {
+                name = format!("{base}_{n}");
+                n += 1;
+            }
+            taken.insert(name.clone());
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// As [`format_csq`], with `extras` appended after the standard columns.
+pub fn format_csq_with_extra(vf: &VariationFeature, fields: &[&str], extras: &[CsqExtra]) -> String {
     let mut result = String::with_capacity(1024);
 
     // Resolve the column names once for the whole variant. A variant in a
@@ -17,6 +125,9 @@ pub fn format_csq(vf: &VariationFeature, fields: &[&str]) -> String {
     // to re-match all 49 header strings.
     let fields: Vec<CsqField> = fields.iter().copied().map(CsqField::from_name).collect();
 
+    // Rendered columns of a gene-level record, per (source, gene): a gene's
+    // transcripts all need the same one, and ClinVar protein lists can be long.
+    let mut gene_cache: std::collections::HashMap<(usize, String), Vec<String>> = Default::default();
     let mut first = true;
     for tv in &vf.transcript_variations {
         for aa in &tv.allele_annotations {
@@ -25,10 +136,126 @@ pub fn format_csq(vf: &VariationFeature, fields: &[&str]) -> String {
             }
             first = false;
             format_csq_entry_into(vf, tv, aa, &fields, &mut result);
+            write_extra_columns(vf, tv, aa, extras, &mut gene_cache, &mut result);
         }
     }
 
     result
+}
+
+/// Append the `extras` columns of one CSQ entry, each preceded by `|`.
+///
+/// A source with no record for this (transcript, allele) leaves its columns
+/// empty without parsing anything.
+fn write_extra_columns(
+    vf: &VariationFeature,
+    tv: &TranscriptVariation,
+    aa: &AlleleAnnotation,
+    extras: &[CsqExtra],
+    gene_cache: &mut std::collections::HashMap<(usize, String), Vec<String>>,
+    buf: &mut String,
+) {
+    for (at, extra) in extras.iter().enumerate() {
+        if extra.gene_level {
+            // The record filed under this entry's own gene symbol, if any.
+            let values = tv.gene_symbol.as_deref().map(|symbol| {
+                gene_cache
+                    .entry((at, symbol.to_string()))
+                    .or_insert_with(|| gene_column_values(vf, extra, symbol))
+            });
+            for (i, _) in extra.columns.iter().enumerate() {
+                buf.push('|');
+                if let Some(v) = values.as_ref().and_then(|v| v.get(i)) {
+                    buf.push_str(v);
+                }
+            }
+            continue;
+        }
+        let record: Option<Value> = aa
+            .supplementary
+            .iter()
+            .find(|(key, _)| *key == extra.json_key)
+            .and_then(|(_, json)| serde_json::from_str(json).ok());
+        for (i, column) in extra.columns.iter().enumerate() {
+            buf.push('|');
+            match &record {
+                Some(Value::Object(object)) => {
+                    if let Some(value) = object.get(column) {
+                        push_csq_value(value, buf);
+                    }
+                }
+                // Interval sources (G2P, repeatmasker) give a list of records: each
+                // column lists its values from every record, `&`-joined. Values are
+                // percent-encoded here, so a `|` or `,` inside one (G2P names have
+                // `|`) cannot be mistaken for the separator.
+                Some(Value::Array(records)) => {
+                    let mut seen: Vec<String> = Vec::new();
+                    for rec in records {
+                        let Some(text) = rec.get(column).map(json_leaf_to_string) else { continue };
+                        if !text.is_empty() {
+                            let item = escape_vcf_subfield(&text);
+                            if !seen.contains(&item) {
+                                seen.push(item);
+                            }
+                        }
+                    }
+                    buf.push_str(&seen.join("&"));
+                }
+                // A bare number or string (a positional score such as remm's) fills
+                // the first column.
+                Some(scalar @ (Value::Number(_) | Value::String(_) | Value::Bool(_))) if i == 0 => {
+                    push_csq_value(scalar, buf);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// One JSON value as a CSQ cell: a list is `&`-joined, as VEP writes one.
+fn push_csq_value(value: &Value, buf: &mut String) {
+    match value {
+        Value::String(v) => escape_csq_str(v, buf),
+        Value::Null | Value::Object(_) => {}
+        Value::Array(items) => {
+            let mut first = true;
+            for item in items {
+                let text = json_leaf_to_string(item);
+                if text.is_empty() {
+                    continue;
+                }
+                if !first {
+                    buf.push('&');
+                }
+                first = false;
+                escape_csq_str(&text, buf);
+            }
+        }
+        other => escape_csq_str(&other.to_string(), buf),
+    }
+}
+
+/// The CSQ cells of a gene-level source for one gene symbol, one per column
+/// (empty strings when the gene has no record).
+fn gene_column_values(vf: &VariationFeature, extra: &CsqExtra, symbol: &str) -> Vec<String> {
+    let mut cells = vec![String::new(); extra.columns.len()];
+    let Some(parsed) = vf
+        .gene_annotations
+        .iter()
+        .find(|ga| ga.json_key == extra.json_key && ga.gene_symbol == symbol)
+        .and_then(|ga| serde_json::from_str::<Value>(&ga.json_string).ok())
+    else {
+        return cells;
+    };
+    for (cell, column) in cells.iter_mut().zip(&extra.columns) {
+        if extra.json_key == "clinvar_protein" {
+            // Same `pos:ref>alt:significance` list as FV_CLINVAR_PROTEIN.
+            push_clinvar_protein_records(cell, &parsed);
+        } else if let Some(value) = parsed.get(column) {
+            push_csq_value(value, cell);
+        }
+    }
+    cells
 }
 
 /// One CSQ column, resolved from its header name.
@@ -541,9 +768,19 @@ pub fn csq_fields_with_pick() -> Vec<&'static str> {
 
 /// Generate the VCF INFO header line for CSQ.
 pub fn csq_header_line(fields: &[&str]) -> String {
+    csq_header_line_with_extra(fields, &[])
+}
+
+/// As [`csq_header_line`], naming the `extras` columns after the standard ones.
+pub fn csq_header_line_with_extra(fields: &[&str], extras: &[CsqExtra]) -> String {
+    let names: Vec<String> = fields
+        .iter()
+        .map(|f| f.to_string())
+        .chain(csq_extra_names(fields, extras))
+        .collect();
     format!(
         "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from fastVEP. Format: {}\">",
-        fields.join("|")
+        names.join("|")
     )
 }
 
@@ -854,21 +1091,31 @@ pub fn vcf_info_header_lines(
     csq_fields: &[&str],
     sa_only: bool,
 ) -> Vec<String> {
+    vcf_info_header_lines_with_extra(specs, csq_fields, &[], sa_only)
+}
+
+/// As [`vcf_info_header_lines`], with the CSQ `extras` columns declared.
+pub fn vcf_info_header_lines_with_extra(
+    specs: &LoadedSupplementarySpecs,
+    csq_fields: &[&str],
+    extras: &[CsqExtra],
+    sa_only: bool,
+) -> Vec<String> {
     let mut headers = if sa_only {
         Vec::new()
     } else {
-        vec![csq_header_line(csq_fields)]
+        vec![csq_header_line_with_extra(csq_fields, extras)]
     };
     if specs.spliceai {
         headers.push(spliceai_header_line());
     }
-    for spec in specs.loaded_specs() {
+    for spec in specs.loaded_specs().filter(|s| !specs.vcf_hidden.contains(s.json_key)) {
         headers.push(format!(
             "##INFO=<ID={},Number=.,Type=String,Description=\"{}\">",
             spec.info_id, spec.description
         ));
     }
-    for custom in &specs.custom {
+    for custom in specs.custom.iter().filter(|c| !specs.vcf_hidden.contains(&c.json_key)) {
         headers.push(format!(
             "##INFO=<ID={},Number=.,Type=String,Description=\"{}\">",
             custom.info_id, custom.description
@@ -900,6 +1147,9 @@ pub struct LoadedSupplementarySpecs {
     /// providers opened, and the per-variant loop runs once per
     /// (variant x transcript x allele x source).
     custom: Vec<CustomProjection>,
+    /// `json_key`s whose `FV_*` field the VCF leaves out (their columns are in
+    /// the CSQ). The ID is still owned, so a stale copy in the input is stripped.
+    vcf_hidden: std::collections::HashSet<String>,
     /// Total number of extra tab columns (`spliceai` + number of `true`
     /// entries in `per_spec` + `custom`), cached at construction so the
     /// per-row hot path doesn't re-scan for the column count.
@@ -939,13 +1189,17 @@ impl LoadedSupplementarySpecs {
         let mut taken: std::collections::HashSet<String> =
             taken.into_iter().map(str::to_string).collect();
         let mut custom = Vec::new();
+        // A source split over several files (`Annotations_chr1.osa2`, ...) loads
+        // once per file under one key; it is one source, so one field.
         let described = |keys: &[String], gene_keyed: bool| -> Vec<(String, bool)> {
+            let mut seen = std::collections::HashSet::new();
             keys.iter()
                 .filter(|key| {
                     *key != "spliceAI"
                         && !VCF_PROJECTION_SPECS
                             .iter()
                             .any(|spec| spec.json_key == key.as_str())
+                        && seen.insert(key.as_str())
                 })
                 .map(|key| (key.clone(), gene_keyed))
                 .collect()
@@ -981,8 +1235,15 @@ impl LoadedSupplementarySpecs {
             spliceai,
             per_spec,
             custom,
+            vcf_hidden: Default::default(),
             column_count,
         }
+    }
+
+    /// Leave the `FV_*` VCF field of these sources out of the header and the
+    /// records. Tab output is not affected.
+    pub fn hide_in_vcf(&mut self, json_keys: &[String]) {
+        self.vcf_hidden.extend(json_keys.iter().cloned());
     }
 
     /// Number of extra tab columns this lookup will produce (including
@@ -1101,6 +1362,9 @@ pub fn format_supplementary_vcf_info(
     }
 
     for spec in VCF_PROJECTION_SPECS {
+        if specs.vcf_hidden.contains(spec.json_key) {
+            continue;
+        }
         let value = match spec.kind {
             VcfProjectionKind::AlleleObject | VcfProjectionKind::AlleleScalar => {
                 format_allele_projection(vf, spec)
@@ -1113,7 +1377,7 @@ pub fn format_supplementary_vcf_info(
         }
     }
 
-    for custom in &specs.custom {
+    for custom in specs.custom.iter().filter(|c| !specs.vcf_hidden.contains(&c.json_key)) {
         let value = if custom.gene_keyed {
             format_custom_gene_projection(vf, custom)
         } else {
@@ -2971,6 +3235,157 @@ mod tests {
         }
     }
 
+    #[test]
+    fn csq_lists_the_columns_of_a_keyed_source_per_transcript() {
+        let mut vf = projection_test_variant();
+        vf.transcript_variations[0].allele_annotations[0]
+            .supplementary
+            .push(("panel".into(), r#"{"b":"2","a":"x|y,z","extra":"unlisted"}"#.into()));
+        // A second transcript the source has no entry for.
+        let mut other = vf.transcript_variations[0].clone();
+        other.transcript_id = Arc::from("TX2");
+        other.allele_annotations[0].supplementary.clear();
+        vf.transcript_variations.push(other);
+
+        let extras = [CsqExtra::new("panel", vec!["a".into(), "b".into(), "missing".into()])];
+        let csq = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
+        let entries: Vec<&str> = csq.split(',').collect();
+        // `|` and `,` inside a value become `&`, as in every other CSQ column.
+        assert_eq!(entries.len(), 2, "{csq}");
+        let tail = |e: &str| e.splitn(DEFAULT_CSQ_FIELDS.len() + 1, '|').last().unwrap().to_string();
+        assert_eq!(tail(entries[0]), "x&y&z|2|");
+        assert_eq!(tail(entries[1]), "||");
+
+        // The header names every column, after the standard ones.
+        let header = csq_header_line_with_extra(DEFAULT_CSQ_FIELDS, &extras);
+        assert!(header.ends_with("ACMG_CRITERIA|a|b|missing\">"), "{header}");
+        // A name that is already a CSQ column, or one a previous source took, is prefixed.
+        let clash = [
+            CsqExtra::new("db", vec!["APPRIS".into(), "score".into()]),
+            CsqExtra::new("other", vec!["score".into(), "APPRIS".into()]),
+        ];
+        assert_eq!(
+            csq_extra_names(DEFAULT_CSQ_FIELDS, &clash),
+            ["db_APPRIS", "score", "other_score", "other_APPRIS"]
+        );
+        // Without extras the output is exactly what it was.
+        assert_eq!(format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &[]), format_csq(&vf, DEFAULT_CSQ_FIELDS));
+    }
+
+    #[test]
+    fn clinvar_and_gnomad_get_prefixed_csq_columns() {
+        let mut vf = projection_test_variant();
+        // The fixture's clinvar payload has a list for significance and phenotypes.
+        let extras = builtin_csq_extras(&["clinvar".to_string(), "gnomad".to_string(), "dbsnp".to_string()], &[]);
+        assert_eq!(extras.len(), 2, "only ClinVar and gnomAD");
+        let names = csq_extra_names(DEFAULT_CSQ_FIELDS, &extras);
+        assert_eq!(names[0], "CLINVAR_SIGNIFICANCE");
+        assert!(names.contains(&"CLINVAR_SO_ACCESSION".to_string()));
+        assert!(names.contains(&"GNOMAD_ALL_AF".to_string()) && names.contains(&"GNOMAD_REMAINING_AF".to_string()));
+        assert_eq!(names.len(), CLINVAR_FIELDS.len() + GNOMAD_FIELDS.len());
+
+        let csq = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
+        let tail: Vec<&str> = csq.split('|').skip(DEFAULT_CSQ_FIELDS.len()).collect();
+        // significance: both list items, `&`-joined; reviewStatus keeps its commas escaped.
+        assert_eq!(tail[0], "Pathogenic&Likely_pathogenic");
+        assert_eq!(tail[1], "criteria_provided&_multiple_submitters&_no_conflicts");
+        assert_eq!(tail[3], "SNV");
+        // gnomAD: ALL_AF first of its own block.
+        assert_eq!(tail[CLINVAR_FIELDS.len()], "0.00012");
+        // A transcript with neither payload leaves every column empty.
+        vf.transcript_variations[0].allele_annotations[0].supplementary.clear();
+        let empty = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
+        let blanks = empty.split('|').skip(DEFAULT_CSQ_FIELDS.len()).all(str::is_empty);
+        assert!(blanks, "{empty}");
+    }
+
+    #[test]
+    fn gene_level_sources_get_csq_columns_for_the_entrys_own_gene() {
+        let mut vf = projection_test_variant();
+        // A second transcript on a gene with no gene-level records.
+        let mut other = vf.transcript_variations[0].clone();
+        other.transcript_id = Arc::from("TX2");
+        other.gene_symbol = Some(Arc::from("OTHER"));
+        vf.transcript_variations.push(other);
+
+        let gene_keys = ["omim", "gnomad_genes", "clinvar_protein"].map(String::from);
+        let extras = builtin_csq_extras(&[], &gene_keys);
+        let names = csq_extra_names(DEFAULT_CSQ_FIELDS, &extras);
+        // No SYMBOL column: the CSQ entry already carries it.
+        assert_eq!(
+            names,
+            [
+                "OMIM_MIM_NUMBER", "OMIM_PHENOTYPES",
+                "GNOMAD_GENE_PLI", "GNOMAD_GENE_LOEUF", "GNOMAD_GENE_MIS_Z", "GNOMAD_GENE_SYN_Z",
+                "CLINVAR_PROTEIN_PROTEIN_VARIANTS",
+            ]
+        );
+
+        let csq = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
+        let cells = |entry: &str| -> Vec<String> {
+            entry.split('|').skip(DEFAULT_CSQ_FIELDS.len()).map(String::from).collect()
+        };
+        let entries: Vec<&str> = csq.split(',').collect();
+        assert_eq!(entries.len(), 2, "{csq}");
+        let gene1 = cells(entries[0]);
+        assert_eq!(gene1[0], "113705");
+        assert_eq!(gene1[1], "Breast_cancer&Ovarian&cancer");
+        assert_eq!(&gene1[2..6], ["1.0", "0.03", "3.45", "0.12"]);
+        assert_eq!(gene1[6], "175:R>H:Pathogenic");
+        // The other gene has no record under its own symbol: every cell is empty.
+        assert!(cells(entries[1]).iter().all(String::is_empty), "{}", entries[1]);
+    }
+
+    #[test]
+    fn custom_sources_fill_csq_columns_from_objects_lists_and_scalars() {
+        let mut vf = projection_test_variant();
+        let aa = &mut vf.transcript_variations[0].allele_annotations[0];
+        aa.supplementary.clear();
+        aa.supplementary.push(("panel".into(), r#"{"AF":"0.4","FILTER":"PASS"}"#.into()));
+        // An interval source: a list of records, one of them repeated, with `|` in a value.
+        aa.supplementary.push((
+            "genes".into(),
+            r#"[{"name":"A|1","score":0.0},{"name":"B","score":1.5},{"name":"A|1","score":0.0}]"#.into(),
+        ));
+        aa.supplementary.push(("remm".into(), "0.62748".into()));
+
+        let mut panel = CsqExtra::new("panel", vec!["AF".into(), "FILTER".into()]);
+        panel.prefix = "PANEL_".into();
+        let mut genes = CsqExtra::new("genes", vec!["name".into(), "score".into()]);
+        genes.prefix = "GENES_".into();
+        let mut remm = CsqExtra::new("remm", vec!["score".into()]);
+        remm.prefix = "REMM_".into();
+        let extras = [panel, genes, remm];
+
+        let names = csq_extra_names(DEFAULT_CSQ_FIELDS, &extras);
+        assert_eq!(names, ["PANEL_AF", "PANEL_FILTER", "GENES_name", "GENES_score", "REMM_score"]);
+        let csq = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
+        let cells: Vec<&str> = csq.split('|').skip(DEFAULT_CSQ_FIELDS.len()).collect();
+        assert_eq!(cells[0], "0.4");
+        assert_eq!(cells[1], "PASS");
+        // Records join with `&`, the repeated one once, the `|` percent-encoded.
+        assert_eq!(cells[2], "A%7C1&B");
+        assert_eq!(cells[3], "0.0&1.5");
+        assert_eq!(cells[4], "0.62748");
+    }
+
+    #[test]
+    fn hidden_sources_leave_the_vcf_header_and_records_but_keep_their_id_owned() {
+        let vf = projection_test_variant();
+        let keys = ["clinvar", "gnomad", "dbsnp", "panel"].map(String::from);
+        let mut specs = LoadedSupplementarySpecs::new(&keys, &[]);
+        let before = format_supplementary_vcf_info(&vf, &specs);
+        assert!(before.iter().any(|(id, _)| id == "FV_CLINVAR"));
+        specs.hide_in_vcf(&["clinvar".to_string(), "panel".to_string()]);
+        let ids: Vec<String> = format_supplementary_vcf_info(&vf, &specs).into_iter().map(|(id, _)| id).collect();
+        assert!(!ids.contains(&"FV_CLINVAR".to_string()) && ids.contains(&"FV_GNOMAD".to_string()), "{ids:?}");
+        let header = vcf_info_header_lines(&specs, DEFAULT_CSQ_FIELDS, false).join("\n");
+        assert!(!header.contains("ID=FV_CLINVAR") && !header.contains("ID=FV_PANEL"), "{header}");
+        assert!(header.contains("ID=FV_GNOMAD") && header.contains("ID=FV_DBSNP"));
+        // Still owned: re-annotating a VCF that carries an old FV_CLINVAR strips it.
+        assert!(vcf_owned_info_ids(&specs).contains(&"FV_CLINVAR"));
+    }
+
     /// A variant carrying only user-supplied custom payloads, so nothing below
     /// can be satisfied by a built-in projection.
     fn custom_source_variant(
@@ -3157,6 +3572,20 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(value, "G|AF=0.1&AF=0.2&ID=x");
+    }
+
+    #[test]
+    fn a_source_loaded_from_several_files_is_one_field() {
+        // `--sa-dir` holding Annotations_chr1.osa2 ... chr22.osa2: 24 providers,
+        // one json_key, so one INFO field rather than FV_X, FV_X_2, ... FV_X_24.
+        let keys = vec!["Annotations".to_string(); 24];
+        let specs = LoadedSupplementarySpecs::new(&keys, &[]);
+        assert_eq!(specs.custom.len(), 1);
+        assert_eq!(specs.custom[0].info_id, "FV_ANNOTATIONS");
+        // Distinct names that sanitise alike still get separate fields.
+        let both =
+            LoadedSupplementarySpecs::new(&["my-panel".to_string(), "my_panel".to_string()], &[]);
+        assert_eq!(both.custom.len(), 2);
     }
 
     #[test]

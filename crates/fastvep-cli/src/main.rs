@@ -184,6 +184,13 @@ enum Commands {
         #[arg(long)]
         qc_rules: Option<String>,
 
+        /// Leave out the `FV_*` INFO fields (header and records) of sources whose
+        /// columns are already in the CSQ: ClinVar, gnomAD, OMIM, dbNSFP and the
+        /// others listed in `<sa-dir>/csq_columns.json` or by their database.
+        /// VCF output only; SpliceAI is not affected.
+        #[arg(long, default_value_t = false)]
+        no_fv_info: bool,
+
         /// Suppress periodic progress output
         #[arg(long, default_value_t = false)]
         no_progress: bool,
@@ -237,7 +244,8 @@ enum Commands {
     /// Build a supplementary annotation database (.osa or .osi) from a source file
     SaBuild {
         /// Source type. Known sources (clinvar, gnomad, dbsnp, …) use their
-        /// dedicated parsers; `custom_vcf` and `custom_bed` accept any
+        /// dedicated parsers; `custom_tsv` reads a header-named TSV into an `.osa2`
+        /// (with optional `--chunk-bits` and gene/transcript keys); `custom_vcf` and `custom_bed` accept any
         /// well-formed VCF/BED file and produce a generic `.osa` or `.osi`
         /// keyed by `--name`. `custom` is an alias that auto-detects VCF vs
         /// BED from the input extension.
@@ -278,6 +286,26 @@ enum Commands {
         /// (e.g. for a faster one-time build) or `osa2` to force v2.
         #[arg(long, default_value = "auto")]
         format: String,
+
+        /// Chunk width for `.osa2` as a power of two (1..=20; 12 = 4 kb,
+        /// 20 = 1 Mb). `custom_tsv` only; use a small value for wide records.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=20))]
+        chunk_bits: Option<u32>,
+
+        /// Column holding the transcript ID; makes the `.osa2` keyed by
+        /// (pos, ref, alt, transcript). `custom_tsv` only, e.g. Ensembl_transcriptid.
+        #[arg(long)]
+        key_transcript: Option<String>,
+
+        /// Column holding the gene ID; keys the `.osa2` by gene, alone or
+        /// with `--key-transcript`. `custom_tsv` only, e.g. Ensembl_geneid.
+        #[arg(long)]
+        key_gene: Option<String>,
+
+        /// ID namespace of the key columns: `ensembl` (default) or `refseq`.
+        /// Checked against every ID and recorded in metadata.json.
+        #[arg(long, value_parser = ["ensembl", "refseq"])]
+        key_type: Option<String>,
 
         /// Suppress periodic progress output
         #[arg(long, default_value_t = false)]
@@ -366,9 +394,11 @@ fn main() -> Result<()> {
             gene_list,
             explicit_alleles,
             qc_rules,
+            no_fv_info,
             no_progress,
         } => {
             pipeline::run_annotate(pipeline::AnnotateConfig {
+                hide_fv_info: no_fv_info,
                 input,
                 output,
                 gff3,
@@ -427,8 +457,12 @@ fn main() -> Result<()> {
             name,
             info_fields,
             format,
+            chunk_bits,
+            key_transcript,
+            key_gene,
+            key_type,
             no_progress,
-        } => pipeline::run_sa_build_format(
+        } => pipeline::run_sa_build_format_keyed(
             &format,
             &source,
             &input,
@@ -436,6 +470,12 @@ fn main() -> Result<()> {
             &assembly,
             name.as_deref(),
             &info_fields,
+            chunk_bits,
+            &pipeline::SaBuildKeys {
+                transcript: key_transcript,
+                gene: key_gene,
+                key_type,
+            },
             !no_progress,
         )?,
         Commands::SaConvert {

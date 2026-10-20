@@ -127,6 +127,7 @@ fn annotate_over(
     write(&vcf_in, vcf);
 
     run_annotate(AnnotateConfig {
+        hide_fv_info: false,
         input: vcf_in.to_string_lossy().into(),
         output: out.to_string_lossy().into(),
         gff3: vec![gff3.to_string_lossy().into()],

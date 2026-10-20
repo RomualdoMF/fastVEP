@@ -63,6 +63,7 @@ fn write_vcf(dir: &Path) -> PathBuf {
 
 fn config(input: &Path, out: &Path) -> AnnotateConfig {
     AnnotateConfig {
+        hide_fv_info: false,
         input: input.to_string_lossy().into(),
         output: out.to_string_lossy().into(),
         gff3: vec![],
@@ -129,6 +130,7 @@ fn an_ncrna_gene_reaches_the_csq_with_its_symbol() {
     let out = dir.path().join("out.vcf");
 
     run_annotate(AnnotateConfig {
+        hide_fv_info: false,
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out)

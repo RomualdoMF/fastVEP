@@ -37,6 +37,8 @@ use fastvep_annotate::{
 const BATCH_SIZE: usize = 1024;
 
 pub struct AnnotateConfig {
+    /// Leave out the `FV_*` VCF INFO fields of sources whose columns are in the CSQ.
+    pub hide_fv_info: bool,
     pub input: String,
     pub output: String,
     /// One or more GFF3 annotation sources. An empty Vec means "no
@@ -592,6 +594,8 @@ fn annotate_variant(
         let chrom = &vf.position.chromosome;
         let sa_queries = vf.query_alleles();
         let mut allele_results: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        // (pos, ref, alt) per allele, reused by the per-transcript keyed lookups.
+        let mut allele_queries: HashMap<String, (u64, String, String)> = HashMap::new();
         for tv in &vf.transcript_variations {
             for aa in &tv.allele_annotations {
                 let allele_key = aa.allele.to_string();
@@ -627,8 +631,16 @@ fn annotate_variant(
                 } else {
                     None
                 };
+                allele_queries.insert(
+                    allele_key.clone(),
+                    (query_pos, ref_str.clone(), alt_str.clone()),
+                );
                 let mut results: Vec<(String, String)> = Vec::new();
                 for sa in sa_providers {
+                    // Gene/transcript-keyed databases are queried per transcript below.
+                    if sa.key_scope() != (false, false) {
+                        continue;
+                    }
                     let (sa_pos, sa_ref, sa_alt) = if sa.metadata().match_by_allele {
                         if sa.json_key() == "gnomad" {
                             match &gnomad_norm {
@@ -660,10 +672,40 @@ fn annotate_variant(
                 allele_results.insert(allele_key, results);
             }
         }
+        let keyed: Vec<_> = sa_providers
+            .iter()
+            .filter(|sa| sa.key_scope() != (false, false))
+            .collect();
         for tv in &mut vf.transcript_variations {
             for aa in &mut tv.allele_annotations {
-                if let Some(results) = allele_results.get(&aa.allele.to_string()) {
+                let allele_key = aa.allele.to_string();
+                if let Some(results) = allele_results.get(&allele_key) {
                     aa.supplementary.extend(results.iter().cloned());
+                }
+                let Some((q_pos, q_ref, q_alt)) = allele_queries.get(&allele_key) else {
+                    continue;
+                };
+                for sa in &keyed {
+                    match fastvep_cache::annotation::annotate_keyed(
+                        &***sa,
+                        chrom,
+                        *q_pos,
+                        q_ref,
+                        q_alt,
+                        &tv.gene_id,
+                        tv.gene_symbol.as_deref(),
+                        &tv.transcript_id,
+                    ) {
+                        Ok(Some(ann)) => {
+                            let json = match ann {
+                                AnnotationValue::Json(j) | AnnotationValue::Positional(j) => j,
+                                AnnotationValue::Interval(v) => format!("[{}]", v.join(",")),
+                            };
+                            aa.supplementary.push((sa.json_key().to_string(), json));
+                        }
+                        Ok(None) => {}
+                        Err(e) => fastvep_annotate::sa_lookup_errors().record(sa.json_key(), &e),
+                    }
                 }
             }
         }
@@ -1454,10 +1496,50 @@ pub fn run_annotate(mut config: AnnotateConfig) -> Result<()> {
     // redo an O(specs × keys) membership scan for every variant. The owned-ID
     // list and the header lines are derived from the same lookup, so the
     // headers a run declares and the fields it emits cannot disagree.
-    let supplementary_specs = output::LoadedSupplementarySpecs::new(&sa_json_keys, &gene_json_keys);
-    let owned_vcf_info_ids = output::vcf_owned_info_ids(&supplementary_specs);
+    let mut supplementary_specs = output::LoadedSupplementarySpecs::new(&sa_json_keys, &gene_json_keys);
+    // Owned copies: `hide_in_vcf` below needs the specs mutably.
+    let owned_vcf_info_ids: Vec<String> = output::vcf_owned_info_ids(&supplementary_specs)
+        .into_iter()
+        .map(String::from)
+        .collect();
+    // Sources that list their columns get them in every CSQ entry, filled from the
+    // record that matched that entry. A source loaded from several files (one per
+    // chromosome) is one source: the columns are the union of its files', in
+    // first-seen order. Sources are ordered by key so the column names (a clash
+    // prefixes the later one) do not depend on the order files were found in.
+    let mut csq_extras: Vec<output::CsqExtra> = Vec::new();
+    for sa in sa_providers.iter().filter(|sa| !sa.csq_columns().is_empty()) {
+        let at = match csq_extras.iter().position(|e| e.json_key == sa.json_key()) {
+            Some(at) => at,
+            None => {
+                csq_extras.push(output::CsqExtra::new(sa.json_key(), Vec::new()));
+                csq_extras.len() - 1
+            }
+        };
+        for column in sa.csq_columns() {
+            if !csq_extras[at].columns.contains(column) {
+                csq_extras[at].columns.push(column.clone());
+            }
+        }
+    }
+    // `<sa-dir>/csq_columns.json` describes the sources whose databases do not
+    // list their columns, and trims or renames the columns of those that do.
+    if let Some(dir) = config.sa_dir.as_deref() {
+        apply_csq_sidecar(Path::new(dir), &sa_json_keys, &mut csq_extras)?;
+    }
+    // ClinVar and gnomAD have fixed field lists, written CLINVAR_* / GNOMAD_*.
+    for builtin in output::builtin_csq_extras(&sa_json_keys, &gene_json_keys) {
+        if !csq_extras.iter().any(|e| e.json_key == builtin.json_key) {
+            csq_extras.push(builtin);
+        }
+    }
+    csq_extras.sort_by(|a, b| a.json_key.cmp(&b.json_key));
+    if config.hide_fv_info {
+        let covered: Vec<String> = csq_extras.iter().map(|e| e.json_key.clone()).collect();
+        supplementary_specs.hide_in_vcf(&covered);
+    }
     let generated_vcf_headers =
-        output::vcf_info_header_lines(&supplementary_specs, &csq_fields, sa_only);
+        output::vcf_info_header_lines_with_extra(&supplementary_specs, &csq_fields, &csq_extras, sa_only);
 
     // Write headers based on output format
     match config.output_format.as_str() {
@@ -1465,7 +1547,7 @@ pub fn run_annotate(mut config: AnnotateConfig) -> Result<()> {
             // Pass through original VCF headers
             for header_line in vcf_parser.header_lines() {
                 if let Some(info_id) = output::vcf_info_header_id(header_line) {
-                    if owned_vcf_info_ids.contains(&info_id) {
+                    if owned_vcf_info_ids.iter().any(|owned| owned == info_id) {
                         continue;
                     }
                 }
@@ -1643,7 +1725,7 @@ pub fn run_annotate(mut config: AnnotateConfig) -> Result<()> {
         for (vf, _) in &batch {
             match config.output_format.as_str() {
                 "vcf" => {
-                    write_vcf_line(&mut writer, vf, sa_only, &supplementary_specs, &csq_fields)?
+                    write_vcf_line(&mut writer, vf, sa_only, &supplementary_specs, &csq_fields, &csq_extras)?
                 }
                 "tab" => {
                     // Classify variant against QC rules (if any). The
@@ -1992,18 +2074,107 @@ fn enrich_compound_het_batch(
     }
 }
 
+/// Apply `<dir>/csq_columns.json` to the CSQ column sources:
+///
+/// ```json
+/// {
+///   "ABraOM": {"prefix": "ABRAOM_", "columns": ["Abraom_AC", "Abraom_AF"]},
+///   "dbnsfp": {"exclude": ["APPRIS"], "rename": {"DANN_score": "DANN_score_coding"}}
+/// }
+/// ```
+///
+/// An entry with `columns` adds a source whose database does not list them: each
+/// name is `prefix` + column, the column being the key looked up in the record
+/// (a source whose record is a bare number takes one column). `exclude` drops
+/// columns and `rename` changes the header name of columns of a source that is
+/// already listed (by its database or built in); both use the column's own name,
+/// without the prefix. A missing file changes nothing; an entry naming a source
+/// that is not loaded, or a column it does not have, is ignored with a warning.
+fn apply_csq_sidecar(
+    dir: &Path,
+    loaded: &[String],
+    extras: &mut Vec<output::CsqExtra>,
+) -> Result<()> {
+    let path = dir.join("csq_columns.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let root: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("Reading {}", path.display()))?;
+    let entries = root
+        .as_object()
+        .with_context(|| format!("{} must be a JSON object", path.display()))?;
+    let warn = |msg: String| eprintln!("warning: {}: {}", path.display(), msg);
+    let strings = |value: Option<&serde_json::Value>| -> Vec<String> {
+        value
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    for (json_key, entry) in entries {
+        if !loaded.contains(json_key) {
+            warn(format!("'{json_key}' is not loaded from {}", dir.display()));
+            continue;
+        }
+        let listed = extras.iter().position(|e| &e.json_key == json_key);
+        let at = match (listed, entry.get("columns")) {
+            (Some(at), _) => at,
+            (None, Some(columns)) => {
+                let mut extra = output::CsqExtra::new(json_key.clone(), strings(Some(columns)));
+                extra.prefix = entry
+                    .get("prefix")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                extras.push(extra);
+                extras.len() - 1
+            }
+            (None, None) => {
+                warn(format!("'{json_key}' lists no columns and its database does not either"));
+                continue;
+            }
+        };
+        let extra = &mut extras[at];
+        // `labels` parallels `columns`; start it as the columns' own names.
+        if extra.labels.len() != extra.columns.len() {
+            extra.labels = extra.columns.clone();
+        }
+        for name in strings(entry.get("exclude")) {
+            match extra.columns.iter().position(|c| *c == name) {
+                Some(i) => {
+                    extra.columns.remove(i);
+                    extra.labels.remove(i);
+                }
+                None => warn(format!("'{json_key}' has no column '{name}' to exclude")),
+            }
+        }
+        if let Some(renames) = entry.get("rename").and_then(|r| r.as_object()) {
+            for (from, to) in renames {
+                let to = to.as_str().unwrap_or_default();
+                match extra.columns.iter().position(|c| c == from) {
+                    Some(i) if !to.is_empty() => extra.labels[i] = to.to_string(),
+                    Some(_) => warn(format!("'{json_key}': new name for '{from}' is empty")),
+                    None => warn(format!("'{json_key}' has no column '{from}' to rename")),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_vcf_line(
     writer: &mut impl Write,
     vf: &VariationFeature,
     sa_only: bool,
     specs: &output::LoadedSupplementarySpecs,
     csq_fields: &[&str],
+    csq_extras: &[output::CsqExtra],
 ) -> Result<()> {
     if let Some(ref fields) = vf.vcf_fields {
         let csq = if sa_only {
             String::new()
         } else {
-            output::format_csq(vf, csq_fields)
+            output::format_csq_with_extra(vf, csq_fields, csq_extras)
         };
         let info = output::format_vcf_info_fields(&fields.info, vf, &csq, specs);
 
@@ -2055,4 +2226,46 @@ fn resolve_functional_by_alt(
                 .cloned()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod csq_sidecar_tests {
+    use super::*;
+
+    fn run(json: &str, loaded: &[&str], mut extras: Vec<output::CsqExtra>) -> Vec<output::CsqExtra> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("csq_columns.json"), json).unwrap();
+        let loaded: Vec<String> = loaded.iter().map(|s| s.to_string()).collect();
+        apply_csq_sidecar(dir.path(), &loaded, &mut extras).unwrap();
+        extras
+    }
+
+    #[test]
+    fn exclude_and_rename_change_a_listed_source_without_touching_its_keys() {
+        let listed = output::CsqExtra::new("db", vec!["APPRIS".into(), "DANN".into(), "keep".into()]);
+        let out = run(
+            r#"{"db": {"exclude": ["APPRIS"], "rename": {"DANN": "DANN_coding"}}}"#,
+            &["db"],
+            vec![listed],
+        );
+        // Lookup keys stay the source's own; only the header names change.
+        assert_eq!(out[0].columns, ["DANN", "keep"]);
+        assert_eq!(out[0].labels, ["DANN_coding", "keep"]);
+        let names = output::csq_extra_names(&[], &out);
+        assert_eq!(names, ["DANN_coding", "keep"]);
+    }
+
+    #[test]
+    fn columns_add_a_source_and_unknown_entries_are_ignored() {
+        let out = run(
+            r#"{"new": {"prefix": "NEW_", "columns": ["a", "b"]}, "gone": {"columns": ["x"]}, "db": {"exclude": ["nope"]}}"#,
+            &["new", "db"],
+            vec![output::CsqExtra::new("db", vec!["k".into()])],
+        );
+        assert_eq!(out.len(), 2);
+        let new = out.iter().find(|e| e.json_key == "new").unwrap();
+        assert_eq!(output::csq_extra_names(&[], std::slice::from_ref(new)), ["NEW_a", "NEW_b"]);
+        // 'gone' is not loaded and 'nope' is not a column: nothing else changed.
+        assert_eq!(out.iter().find(|e| e.json_key == "db").unwrap().columns, ["k"]);
+    }
 }

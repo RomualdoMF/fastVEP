@@ -72,7 +72,7 @@ impl Osa2Writer {
         let mut zip = zip::ZipWriter::new(writer);
         let options = default_options();
 
-        write_prelude(&mut zip, options, &self.metadata, &self.fields)?;
+        write_prelude(&mut zip, options, &self.metadata, &self.fields, None)?;
         write_string_tables(&mut zip, options, &self.fields, &self.string_tables)?;
 
         // Walk contiguous (chrom, chunk_id) runs. Because `records` is sorted,
@@ -126,9 +126,15 @@ fn write_prelude<W: Write + Seek>(
     options: zip::write::SimpleFileOptions,
     metadata: &Osa2Metadata,
     fields: &[Field],
+    keys: Option<&crate::keyed::KeyInfo>,
 ) -> Result<()> {
     zip.start_file("fastsa/metadata.json", options)?;
-    serde_json::to_writer_pretty(&mut *zip, metadata)?;
+    // `keys` rides in metadata.json as an extra field old readers ignore.
+    let mut meta = serde_json::to_value(metadata)?;
+    if let (Some(keys), Some(obj)) = (keys, meta.as_object_mut()) {
+        obj.insert("keys".into(), serde_json::to_value(keys)?);
+    }
+    serde_json::to_writer_pretty(&mut *zip, &meta)?;
     zip.start_file("fastsa/config.json", options)?;
     serde_json::to_writer_pretty(&mut *zip, fields)?;
     Ok(())
@@ -384,9 +390,19 @@ impl<W: Write + Seek> Osa2StreamWriter<W> {
     /// Create a streaming writer, emitting the metadata + config prelude
     /// immediately.
     pub fn new(writer: W, metadata: &Osa2Metadata, fields: Vec<Field>) -> Result<Self> {
+        Self::new_with_keys(writer, metadata, fields, None)
+    }
+
+    /// As [`new`](Self::new), recording which gene/transcript keys the records carry.
+    pub fn new_with_keys(
+        writer: W,
+        metadata: &Osa2Metadata,
+        fields: Vec<Field>,
+        keys: Option<&crate::keyed::KeyInfo>,
+    ) -> Result<Self> {
         let mut zip = zip::ZipWriter::new(writer);
         let options = default_options();
-        write_prelude(&mut zip, options, metadata, &fields)?;
+        write_prelude(&mut zip, options, metadata, &fields, keys)?;
         let string_tables = fields.iter().map(|_| Vec::new()).collect();
         Ok(Self {
             zip,

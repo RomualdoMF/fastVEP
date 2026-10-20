@@ -49,6 +49,7 @@ fn cli_inframe_insertion_hgvsp_is_normalised_not_a_substitution() {
     write(&vcf_in, VCF);
 
     run_annotate(AnnotateConfig {
+        hide_fv_info: false,
         input: vcf_in.to_string_lossy().into(),
         output: vcf_out.to_string_lossy().into(),
         gff3: vec![gff3.to_string_lossy().into()],

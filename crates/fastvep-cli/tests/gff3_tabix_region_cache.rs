@@ -129,6 +129,7 @@ fn write_vcf(dir: &Path, name: &str, pos: u64) -> PathBuf {
 
 fn annotate(input: &Path, gff3: &Path, fasta: &Path, out: &Path) {
     run_annotate(AnnotateConfig {
+        hide_fv_info: false,
         input: input.to_string_lossy().into(),
         output: out.to_string_lossy().into(),
         gff3: vec![gff3.to_string_lossy().into()],

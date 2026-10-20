@@ -385,7 +385,7 @@ pub fn run_sa_build(
             is_positional: false,
         },
         _ => anyhow::bail!(
-            "Unknown source: {}. Supported: clinvar, gnomad, dbsnp, cosmic, onekg, topmed, mitomap, phylop, gerp, dann, revel, spliceai, primateai, dbnsfp, alphamissense, omim, gnomad_genes, clinvar_protein, custom_vcf, custom_bed, custom",
+            "Unknown source: {}. Supported: clinvar, gnomad, dbsnp, cosmic, onekg, topmed, mitomap, phylop, gerp, dann, revel, spliceai, primateai, dbnsfp, alphamissense, omim, gnomad_genes, clinvar_protein, custom_vcf, custom_tsv, custom_bed, custom",
             source
         ),
     };
@@ -576,6 +576,7 @@ pub const OSA2_SUPPORTED_SOURCES: &[&str] = &[
     "spliceai",
     "mitomap",
     "custom_vcf",
+    "custom_tsv",
 ];
 
 /// The subset of [`OSA2_SUPPORTED_SOURCES`] whose v2 encoder decomposes the
@@ -623,6 +624,30 @@ pub fn source_from_json_key(json_key: &str) -> Option<&'static str> {
         .find(|s| *s == lowered.as_str())
 }
 
+/// `.osa2` build options shared by every source arm.
+#[derive(Default)]
+struct BuildOpts {
+    /// Overrides the source's chunk width.
+    chunk_bits: Option<u32>,
+    /// Gene/transcript keys recorded in `metadata.json`.
+    keys: Option<fastvep_sa::keyed::KeyInfo>,
+}
+
+/// `--key-transcript` / `--key-gene` / `--key-type` as given on the command line.
+#[derive(Debug, Clone, Default)]
+pub struct SaBuildKeys {
+    pub transcript: Option<String>,
+    pub gene: Option<String>,
+    /// `ensembl` (default) or `refseq`.
+    pub key_type: Option<String>,
+}
+
+impl SaBuildKeys {
+    fn is_set(&self) -> bool {
+        self.transcript.is_some() || self.gene.is_some()
+    }
+}
+
 /// Dispatch `sa-build` to the v1 or v2 builder according to `--format`:
 ///
 /// * `auto` (the default) — build v2 for sources that support it (smaller and
@@ -644,6 +669,55 @@ pub fn run_sa_build_format(
     info_fields: &[String],
     show_progress: bool,
 ) -> Result<()> {
+    run_sa_build_format_keyed(
+        format,
+        source,
+        input,
+        output,
+        assembly,
+        name,
+        info_fields,
+        None,
+        &SaBuildKeys::default(),
+        show_progress,
+    )
+}
+
+/// As [`run_sa_build_format`], with the `custom_tsv` options: `chunk_bits`
+/// overrides the `.osa2` chunk width (1..=20) and `keys` record the gene /
+/// transcript columns. Any of them with another source is an error.
+#[allow(clippy::too_many_arguments)]
+pub fn run_sa_build_format_keyed(
+    format: &str,
+    source: &str,
+    input: &str,
+    output: &str,
+    assembly: &str,
+    name: Option<&str>,
+    info_fields: &[String],
+    chunk_bits: Option<u32>,
+    keys: &SaBuildKeys,
+    show_progress: bool,
+) -> Result<()> {
+    if chunk_bits.is_some() || keys.is_set() || keys.key_type.is_some() {
+        anyhow::ensure!(
+            source == "custom_tsv",
+            "--chunk-bits, --key-transcript, --key-gene and --key-type only apply to \
+             --source custom_tsv"
+        );
+    }
+    if keys.key_type.is_some() && !keys.is_set() {
+        anyhow::bail!("--key-type needs --key-transcript and/or --key-gene");
+    }
+    if let Some(bits) = chunk_bits {
+        anyhow::ensure!(
+            (1..=20).contains(&bits),
+            "--chunk-bits must be between 1 and 20 (got {bits})"
+        );
+    }
+    if source == "custom_tsv" && matches!(format, "osa" | "v1") {
+        anyhow::bail!("--source custom_tsv builds .osa2 only (use --format auto or osa2)");
+    }
     match format {
         "osa" | "v1" => run_sa_build(
             source,
@@ -654,24 +728,28 @@ pub fn run_sa_build_format(
             info_fields,
             show_progress,
         ),
-        "osa2" | "v2" => run_sa_build_v2(
+        "osa2" | "v2" => run_sa_build_v2_keyed(
             source,
             input,
             output,
             assembly,
             name,
             info_fields,
+            chunk_bits,
+            keys,
             show_progress,
         ),
         "auto" => {
             if source_supports_osa2(source) {
-                run_sa_build_v2(
+                run_sa_build_v2_keyed(
                     source,
                     input,
                     output,
                     assembly,
                     name,
                     info_fields,
+                    chunk_bits,
+                    keys,
                     show_progress,
                 )
             } else {
@@ -712,10 +790,41 @@ pub fn run_sa_build_v2(
     info_fields: &[String],
     show_progress: bool,
 ) -> Result<()> {
+    run_sa_build_v2_keyed(
+        source,
+        input,
+        output,
+        assembly,
+        name,
+        info_fields,
+        None,
+        &SaBuildKeys::default(),
+        show_progress,
+    )
+}
+
+/// As [`run_sa_build_v2`], with the `custom_tsv` `chunk_bits` and `keys`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_sa_build_v2_keyed(
+    source: &str,
+    input: &str,
+    output: &str,
+    assembly: &str,
+    name: Option<&str>,
+    info_fields: &[String],
+    chunk_bits: Option<u32>,
+    keys: &SaBuildKeys,
+    show_progress: bool,
+) -> Result<()> {
+    let mut opts = BuildOpts {
+        chunk_bits,
+        keys: None,
+    };
     use fastvep_sa::sources::{
         alphamissense, clinvar, cosmic, dbnsfp, dbsnp, gnomad, mitomap, onekg, primateai, revel,
         scores, spliceai, topmed,
     };
+    use fastvep_sa::custom_tsv;
 
     let (chrom_list, chrom_map) = standard_chrom_map(assembly);
     let out_path = Path::new(output).with_extension("osa2");
@@ -729,6 +838,7 @@ pub fn run_sa_build_v2(
             let records = gnomad::iter_gnomad_osa2(buf_reader, &chrom_map);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &gnomad::gnomad_osa2_metadata(assembly),
                 gnomad::gnomad_osa2_fields(),
                 &[],
@@ -757,6 +867,7 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_records(v1.into_iter().map(Ok), &chrom_list, &bridge_fields);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &onekg::onekg_osa2_metadata(assembly),
                 fields,
                 &[],
@@ -780,6 +891,7 @@ pub fn run_sa_build_v2(
             );
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &topmed::topmed_osa2_metadata(assembly),
                 fields,
                 &[],
@@ -803,6 +915,7 @@ pub fn run_sa_build_v2(
                 alphamissense::iter_alphamissense_osa2(buf_reader, &chrom_map, &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &alphamissense::alphamissense_osa2_metadata(assembly),
                 alphamissense::alphamissense_osa2_fields(),
                 &alphamissense::alphamissense_string_tables(),
@@ -829,6 +942,7 @@ pub fn run_sa_build_v2(
                 spliceai::iter_spliceai_osa2(buf_reader, &chrom_map, &chrom_list, genes.clone());
             finish_osa2_build_deferred(
                 &out_path,
+                &opts,
                 &spliceai::spliceai_osa2_metadata(assembly),
                 spliceai::spliceai_osa2_fields(),
                 records,
@@ -852,6 +966,7 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_raw_blobs(v1.into_iter().map(Ok), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &mitomap::mitomap_osa2_metadata(assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -896,7 +1011,91 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_raw_blobs(v1.into_iter().map(Ok), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &fastvep_sa::custom::custom_vcf_osa2_metadata(&resolved_name, assembly),
+                fastvep_sa::writer_v2::raw_json_blob_fields(),
+                &[],
+                records,
+                meter,
+                input,
+                assembly,
+            )
+        }
+        // Custom user TSV: header-named columns as a whole-record JSON blob.
+        // Optionally keyed by gene and/or transcript columns, with a
+        // user-chosen chunk width (both via `opts`).
+        "custom_tsv" => {
+            let resolved_name = resolve_custom_name(name, input);
+            eprintln!(
+                "Building custom_tsv .osa2: {} -> {} (name={}, columns={})",
+                input,
+                out_path.display(),
+                resolved_name,
+                if info_fields.is_empty() {
+                    "<all>".to_string()
+                } else {
+                    info_fields.join(",")
+                }
+            );
+            let (buf_reader, meter) = open_sa_reader_with_meter(input, show_progress)?;
+            // Sorted input streams a row at a time; unsorted input is
+            // buffered and sorted, since the v2 writer rejects a reopened chunk.
+            let sorted = custom_tsv::custom_tsv_is_sorted(
+                io::BufReader::new(open_sa_input(input, None)?),
+                &chrom_map,
+            )?;
+            if !sorted {
+                // Buffering holds every row in memory; refuse before it can exhaust it.
+                let bytes = std::fs::metadata(input).map(|m| m.len()).unwrap_or(0);
+                anyhow::ensure!(
+                    bytes <= 16 << 30,
+                    "custom_tsv input is not sorted (each chromosome must be one block, \
+                     positions increasing) and is too large ({} GB) to sort in memory; \
+                     sort it first",
+                    bytes >> 30
+                );
+                eprintln!("custom_tsv input is not sorted; buffering to sort it");
+            }
+            let spec = custom_tsv::TsvKeys {
+                transcript: keys.transcript.clone(),
+                gene: keys.gene.clone(),
+                key_type: keys.key_type.clone().unwrap_or_else(|| "ensembl".into()),
+            };
+            let records: Box<dyn Iterator<Item = Result<fastvep_sa::common::AnnotationRecord>>> =
+                if keys.is_set() {
+                    // The header names the columns CSQ will list for this database.
+                    let columns = custom_tsv::custom_tsv_columns(
+                        io::BufReader::new(open_sa_input(input, None)?),
+                        info_fields,
+                    )?;
+                    opts.keys = Some(spec.info(columns));
+                    let rows =
+                        custom_tsv::iter_custom_tsv_keyed(buf_reader, &chrom_map, info_fields, &spec);
+                    let rows: Box<dyn Iterator<Item = Result<fastvep_sa::keyed::KeyedRow>>> =
+                        if sorted {
+                            Box::new(rows)
+                        } else {
+                            let mut all = rows.collect::<Result<Vec<_>>>()?;
+                            all.sort_by_key(|r| (r.chrom_idx, r.position));
+                            Box::new(all.into_iter().map(Ok))
+                        };
+                    Box::new(fastvep_sa::keyed::Grouper::new(rows))
+                } else {
+                    let rows =
+                        custom_tsv::iter_custom_tsv(buf_reader, &chrom_map, &resolved_name, info_fields);
+                    if sorted {
+                        Box::new(rows)
+                    } else {
+                        let mut all = rows.collect::<Result<Vec<_>>>()?;
+                        all.sort_by_key(|r| (r.chrom_idx, r.position));
+                        Box::new(all.into_iter().map(Ok))
+                    }
+                };
+            let records = bridge_v1_raw_blobs(records, &chrom_list);
+            finish_osa2_build(
+                &out_path,
+                &opts,
+                &custom_tsv::custom_tsv_osa2_metadata(&resolved_name, assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
                 records,
@@ -914,6 +1113,7 @@ pub fn run_sa_build_v2(
                 bridge_v1_raw_blobs(dbsnp::iter_dbsnp_vcf(buf_reader, &chrom_map), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &dbsnp::dbsnp_osa2_metadata(assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -933,6 +1133,7 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_raw_blobs(v1.into_iter().map(Ok), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &cosmic::cosmic_osa2_metadata(assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -956,6 +1157,7 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_raw_blobs(v1.into_iter().map(Ok), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &clinvar::clinvar_osa2_metadata(assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -976,6 +1178,7 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_raw_blobs(v1.into_iter().map(Ok), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &revel::revel_osa2_metadata(assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -996,6 +1199,7 @@ pub fn run_sa_build_v2(
                 bridge_v1_raw_blobs(iter_phylop_auto(buf_reader, &chrom_map), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &scores::score_osa2_metadata("phylop", assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -1018,6 +1222,7 @@ pub fn run_sa_build_v2(
             );
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &scores::score_osa2_metadata(source, assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -1037,6 +1242,7 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_raw_blobs(v1.into_iter().map(Ok), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &dbnsfp::dbnsfp_osa2_metadata(assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -1058,6 +1264,7 @@ pub fn run_sa_build_v2(
             let records = bridge_v1_raw_blobs(v1.into_iter().map(Ok), &chrom_list);
             finish_osa2_build(
                 &out_path,
+                &opts,
                 &primateai::primateai_osa2_metadata(assembly),
                 fastvep_sa::writer_v2::raw_json_blob_fields(),
                 &[],
@@ -1152,6 +1359,7 @@ fn open_sa_reader_with_meter(
 #[allow(clippy::too_many_arguments)]
 fn finish_osa2_build(
     out_path: &Path,
+    opts: &BuildOpts,
     metadata: &fastvep_sa::writer_v2::Osa2Metadata,
     fields: Vec<fastvep_sa::fields::Field>,
     string_tables: &[(usize, Vec<String>)],
@@ -1163,6 +1371,7 @@ fn finish_osa2_build(
     let tables = string_tables.to_vec();
     finish_osa2_build_deferred(
         out_path,
+        opts,
         metadata,
         fields,
         records,
@@ -1184,6 +1393,7 @@ fn finish_osa2_build(
 #[allow(clippy::too_many_arguments)]
 fn finish_osa2_build_deferred<F>(
     out_path: &Path,
+    opts: &BuildOpts,
     metadata: &fastvep_sa::writer_v2::Osa2Metadata,
     fields: Vec<fastvep_sa::fields::Field>,
     records: impl Iterator<Item = Result<fastvep_sa::writer_v2::Osa2Record>>,
@@ -1195,8 +1405,15 @@ fn finish_osa2_build_deferred<F>(
 where
     F: FnOnce() -> Vec<(usize, Vec<String>)>,
 {
+    // `--chunk-bits` overrides the source's default chunk width.
+    let mut metadata = metadata.clone();
+    if let Some(bits) = opts.chunk_bits {
+        metadata.chunk_bits = bits;
+    }
+    let metadata = &metadata;
     let n = match write_osa2_stream(
         out_path,
+        opts.keys.as_ref(),
         metadata,
         fields,
         records,
@@ -1229,6 +1446,7 @@ where
 /// Returns the number of records written.
 fn write_osa2_stream<F>(
     out_path: &Path,
+    keys: Option<&fastvep_sa::keyed::KeyInfo>,
     metadata: &fastvep_sa::writer_v2::Osa2Metadata,
     fields: Vec<fastvep_sa::fields::Field>,
     records: impl Iterator<Item = Result<fastvep_sa::writer_v2::Osa2Record>>,
@@ -1242,7 +1460,8 @@ where
 
     let out_file = std::fs::File::create(out_path)
         .with_context(|| format!("Creating {}", out_path.display()))?;
-    let mut writer = Osa2StreamWriter::new(BufWriter::new(out_file), metadata, fields)?;
+    let mut writer =
+        Osa2StreamWriter::new_with_keys(BufWriter::new(out_file), metadata, fields, keys)?;
 
     let mut n = 0u64;
     for record in records {
@@ -1384,6 +1603,7 @@ pub fn run_sa_convert(
     // so a failed conversion never leaves a corrupt database behind.
     let n = match write_osa2_stream(
         &out_path,
+        None,
         &metadata,
         fastvep_sa::writer_v2::raw_json_blob_fields(),
         records,
