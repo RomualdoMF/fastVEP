@@ -2082,7 +2082,8 @@ fn enrich_compound_het_batch(
 /// ```json
 /// {
 ///   "ABraOM": {"prefix": "ABRAOM_", "columns": ["Abraom_AC", "Abraom_AF"]},
-///   "dbnsfp": {"exclude": ["APPRIS"], "rename": {"DANN_score": "DANN_score_coding"}}
+///   "dbnsfp": {"exclude": ["APPRIS"], "rename": {"DANN_score": "DANN_score_coding"}},
+///   "G2P": {"split": {"name": {"sep": "|", "labels": ["gene", "id", "disease"]}}}
 /// }
 /// ```
 ///
@@ -2138,15 +2139,19 @@ fn apply_csq_sidecar(
             }
         };
         let extra = &mut extras[at];
-        // `labels` parallels `columns`; start it as the columns' own names.
+        // `labels` and `parts` parallel `columns`; start them as plain columns.
         if extra.labels.len() != extra.columns.len() {
             extra.labels = extra.columns.clone();
+        }
+        if extra.parts.len() != extra.columns.len() {
+            extra.parts = vec![None; extra.columns.len()];
         }
         for name in strings(entry.get("exclude")) {
             match extra.columns.iter().position(|c| *c == name) {
                 Some(i) => {
                     extra.columns.remove(i);
                     extra.labels.remove(i);
+                    extra.parts.remove(i);
                 }
                 None => warn(format!("'{json_key}' has no column '{name}' to exclude")),
             }
@@ -2158,6 +2163,36 @@ fn apply_csq_sidecar(
                     Some(i) if !to.is_empty() => extra.labels[i] = to.to_string(),
                     Some(_) => warn(format!("'{json_key}': new name for '{from}' is empty")),
                     None => warn(format!("'{json_key}' has no column '{from}' to rename")),
+                }
+            }
+        }
+        // A column that packs several fields becomes one CSQ column per field.
+        if let Some(splits) = entry.get("split").and_then(|r| r.as_object()) {
+            for (column, spec) in splits {
+                let Some(at) = extra.columns.iter().position(|c| c == column) else {
+                    warn(format!("'{json_key}' has no column '{column}' to split"));
+                    continue;
+                };
+                let sep = spec.get("sep").and_then(|v| v.as_str()).unwrap_or_default();
+                let labels = strings(spec.get("labels"));
+                if sep.is_empty() || labels.is_empty() {
+                    warn(format!("'{json_key}': split of '{column}' needs a \"sep\" and \"labels\""));
+                    continue;
+                }
+                let max = spec
+                    .get("max")
+                    .and_then(|v| v.as_u64())
+                    .map_or(labels.len(), |m| m as usize);
+                extra.columns.remove(at);
+                extra.labels.remove(at);
+                extra.parts.remove(at);
+                for (k, label) in labels.iter().enumerate() {
+                    extra.columns.insert(at + k, column.clone());
+                    extra.labels.insert(at + k, label.clone());
+                    extra.parts.insert(
+                        at + k,
+                        Some(output::SplitPart { sep: sep.to_string(), index: k, max }),
+                    );
                 }
             }
         }
@@ -2256,6 +2291,31 @@ mod csq_sidecar_tests {
         assert_eq!(out[0].labels, ["DANN_coding", "keep"]);
         let names = output::csq_extra_names(&[], &out);
         assert_eq!(names, ["DANN_coding", "keep"]);
+    }
+
+    #[test]
+    fn split_turns_a_packed_column_into_one_column_per_label() {
+        let out = run(
+            r#"{"g2p": {"prefix": "G2P_", "columns": ["name", "score"],
+                "split": {"name": {"sep": "|", "labels": ["gene", "id", "rest"], "max": 3}}}}"#,
+            &["g2p"],
+            vec![],
+        );
+        let e = &out[0];
+        // `name` is replaced in place by three columns reading the same key.
+        assert_eq!(e.columns, ["name", "name", "name", "score"]);
+        let names = output::csq_extra_names(&[], std::slice::from_ref(e));
+        assert_eq!(names, ["G2P_gene", "G2P_id", "G2P_rest", "G2P_score"]);
+        let part = e.parts[2].as_ref().unwrap();
+        assert_eq!((part.sep.as_str(), part.index, part.max), ("|", 2, 3));
+        assert!(e.parts[3].is_none());
+        // A split of a column the source lacks, or without labels, changes nothing.
+        let same = run(
+            r#"{"g2p": {"columns": ["a"], "split": {"zzz": {"sep": "|", "labels": ["x"]}, "a": {"sep": "|"}}}}"#,
+            &["g2p"],
+            vec![],
+        );
+        assert_eq!(same[0].columns, ["a"]);
     }
 
     #[test]

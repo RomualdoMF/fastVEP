@@ -29,6 +29,27 @@ pub struct CsqExtra {
     /// A gene-level source (OMIM, gnomAD constraint, ClinVar protein): the record
     /// is the one filed under the entry's own gene symbol, not under its allele.
     pub gene_level: bool,
+    /// Parallel to `columns` (or empty): `Some` makes the column one field of a
+    /// value that packs several, such as G2P's `gene|id|disease|...`.
+    pub parts: Vec<Option<SplitPart>>,
+}
+
+/// One field of a column whose value is several fields joined by `sep`.
+#[derive(Debug, Clone)]
+pub struct SplitPart {
+    pub sep: String,
+    /// Which field, counting from 0.
+    pub index: usize,
+    /// The value is cut into at most this many fields; the last keeps any further
+    /// `sep` (repeatmasker names such as `Satellite/centr/ALR/Alpha`).
+    pub max: usize,
+}
+
+impl SplitPart {
+    /// The field of `text` this part names (empty when `text` has fewer).
+    pub fn pick<'t>(&self, text: &'t str) -> &'t str {
+        text.splitn(self.max.max(1), self.sep.as_str()).nth(self.index).unwrap_or("")
+    }
 }
 
 impl CsqExtra {
@@ -40,6 +61,7 @@ impl CsqExtra {
             labels: Vec::new(),
             prefix: String::new(),
             gene_level: false,
+            parts: Vec::new(),
         }
     }
 
@@ -52,6 +74,7 @@ impl CsqExtra {
             labels: fields.iter().map(|(label, _)| label.to_string()).collect(),
             prefix: prefix.into(),
             gene_level: false,
+            parts: Vec::new(),
         }
     }
 
@@ -69,10 +92,10 @@ impl CsqExtra {
 pub fn builtin_csq_extras(sa_keys: &[String], gene_keys: &[String]) -> Vec<CsqExtra> {
     let mut extras = Vec::new();
     if sa_keys.iter().any(|k| k == "clinvar") {
-        extras.push(CsqExtra::prefixed("clinvar", "CLINVAR_", CLINVAR_FIELDS));
+        extras.push(CsqExtra::prefixed("clinvar", "CLINVAR_", CLINVAR_CSQ_FIELDS));
     }
     if sa_keys.iter().any(|k| k == "gnomad") {
-        extras.push(CsqExtra::prefixed("gnomad", "GNOMAD_", GNOMAD_FIELDS));
+        extras.push(CsqExtra::prefixed("gnomad", "GNOMAD_", GNOMAD_CSQ_FIELDS));
     }
     if gene_keys.iter().any(|k| k == "omim") {
         extras.push(CsqExtra::prefixed_gene("omim", "OMIM_", OMIM_FIELDS));
@@ -81,7 +104,7 @@ pub fn builtin_csq_extras(sa_keys: &[String], gene_keys: &[String]) -> Vec<CsqEx
         extras.push(CsqExtra::prefixed_gene("gnomad_genes", "GNOMAD_GENE_", GNOMAD_GENE_FIELDS));
     }
     if gene_keys.iter().any(|k| k == "clinvar_protein") {
-        extras.push(CsqExtra::prefixed_gene("clinvar_protein", "CLINVAR_PROTEIN_", CLINVAR_PROTEIN_FIELDS));
+        extras.push(CsqExtra::prefixed_gene("clinvar_protein", "CLINVAR_PROTEIN_", CLINVAR_PROTEIN_CSQ_FIELDS));
     }
     extras
 }
@@ -178,28 +201,38 @@ fn write_extra_columns(
             .and_then(|(_, json)| serde_json::from_str(json).ok());
         for (i, column) in extra.columns.iter().enumerate() {
             buf.push('|');
+            let part = extra.parts.get(i).and_then(Option::as_ref);
             match &record {
                 Some(Value::Object(object)) => {
                     if let Some(value) = object.get(column) {
-                        push_csq_value(value, buf);
-                    }
-                }
-                // Interval sources (G2P, repeatmasker) give a list of records: each
-                // column lists its values from every record, `&`-joined. Values are
-                // percent-encoded here, so a `|` or `,` inside one (G2P names have
-                // `|`) cannot be mistaken for the separator.
-                Some(Value::Array(records)) => {
-                    let mut seen: Vec<String> = Vec::new();
-                    for rec in records {
-                        let Some(text) = rec.get(column).map(json_leaf_to_string) else { continue };
-                        if !text.is_empty() {
-                            let item = escape_vcf_subfield(&text);
-                            if !seen.contains(&item) {
-                                seen.push(item);
+                        match part {
+                            Some(part) => {
+                                escape_csq_str(part.pick(&json_leaf_to_string(value)), buf)
                             }
+                            None => push_csq_value(value, buf),
                         }
                     }
-                    buf.push_str(&seen.join("&"));
+                }
+                // Interval sources (G2P, repeatmasker) give a list of records. Each
+                // column lists that field of every record, `&`-joined and in the
+                // same order, so the n-th item of every column is the same record.
+                // Values are percent-encoded: a `|` or `,` inside one cannot be
+                // mistaken for a separator. A record seen twice counts once.
+                Some(Value::Array(records)) => {
+                    let mut distinct: Vec<&Value> = Vec::new();
+                    let mut items: Vec<String> = Vec::new();
+                    for rec in records {
+                        if distinct.contains(&rec) {
+                            continue;
+                        }
+                        distinct.push(rec);
+                        let text = rec.get(column).map(json_leaf_to_string).unwrap_or_default();
+                        let text = part.map_or(text.as_str(), |p| p.pick(&text)).to_string();
+                        items.push(escape_vcf_subfield(&text));
+                    }
+                    if items.iter().any(|item| !item.is_empty()) {
+                        buf.push_str(&items.join("&"));
+                    }
                 }
                 // A bare number or string (a positional score such as remm's) fills
                 // the first column.
@@ -249,8 +282,17 @@ fn gene_column_values(vf: &VariationFeature, extra: &CsqExtra, symbol: &str) -> 
     };
     for (cell, column) in cells.iter_mut().zip(&extra.columns) {
         if extra.json_key == "clinvar_protein" {
-            // Same `pos:ref>alt:significance` list as FV_CLINVAR_PROTEIN.
-            push_clinvar_protein_records(cell, &parsed);
+            // One column per part of the `pos:ref>alt:significance` records, in the
+            // same order; a record that is not a substitution is skipped everywhere.
+            let items: Vec<String> = parsed
+                .get("proteinVariants")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|rec| rec.get("pos").is_some() && rec.get("refAa").is_some() && rec.get("altAa").is_some())
+                .map(|rec| escape_vcf_subfield(&rec.get(column).map(json_leaf_to_string).unwrap_or_default()))
+                .collect();
+            *cell = items.join("&");
         } else if let Some(value) = parsed.get(column) {
             push_csq_value(value, cell);
         }
@@ -836,6 +878,53 @@ const GNOMAD_FIELDS: &[(&str, &str)] = &[
     ("OTH_AF", "othAf"),
     ("REMAINING_AF", "remainingAf"),
     ("SAS_AF", "sasAf"),
+];
+/// Every column the ClinVar record carries, for the CSQ (the `FV_CLINVAR` list plus
+/// the population frequencies it keeps).
+const CLINVAR_CSQ_FIELDS: &[(&str, &str)] = &[
+    ("SIGNIFICANCE", "significance"),
+    ("REVIEW_STATUS", "reviewStatus"),
+    ("PHENOTYPES", "phenotypes"),
+    ("VARIANT_CLASS", "variantClass"),
+    ("SO_ACCESSION", "soAccession"),
+    ("AF_TGP", "afTgp"),
+    ("AF_ESP", "afEsp"),
+    ("AF_EXAC", "afExac"),
+];
+/// Every column of the gnomAD record, for the CSQ.
+const GNOMAD_CSQ_FIELDS: &[(&str, &str)] = &[
+    ("ALL_AF", "allAf"),
+    ("ALL_AC", "allAc"),
+    ("ALL_AN", "allAn"),
+    ("ALL_HC", "allHc"),
+    ("ALL_AC_XY", "allAcXY"),
+    ("ALL_AN_XY", "allAnXY"),
+    ("AFR_AF", "afrAf"),
+    ("AMR_AF", "amrAf"),
+    ("ASJ_AF", "asjAf"),
+    ("EAS_AF", "easAf"),
+    ("FIN_AF", "finAf"),
+    ("MID_AF", "midAf"),
+    ("NFE_AF", "nfeAf"),
+    ("OTH_AF", "othAf"),
+    ("REMAINING_AF", "remainingAf"),
+    ("SAS_AF", "sasAf"),
+    ("FAF95", "faf95"),
+    ("FAF95_MAX", "faf95Max"),
+    ("FILTER_AC0", "filterAc0"),
+    ("FILTER_INBREEDING", "filterInbreeding"),
+    ("FILTER_VQSR", "filterVqsr"),
+    ("LCR", "lcr"),
+    ("NON_PAR", "nonPar"),
+    ("SEGDUP", "segdup"),
+];
+/// ClinVar protein variants, one column per part of a `pos:ref>alt:significance`
+/// record; the values of a gene's records are `&`-joined in the same order.
+const CLINVAR_PROTEIN_CSQ_FIELDS: &[(&str, &str)] = &[
+    ("POS", "pos"),
+    ("REF_AA", "refAa"),
+    ("ALT_AA", "altAa"),
+    ("SIGNIFICANCE", "sig"),
 ];
 const DBSNP_FIELDS: &[(&str, &str)] = &[("ID", "id"), ("GLOBAL_MAF", "globalMaf")];
 const COSMIC_FIELDS: &[(&str, &str)] = &[("ID", "id"), ("GENE", "gene"), ("COUNT", "count")];
@@ -3308,7 +3397,7 @@ mod tests {
         assert_eq!(names[0], "CLINVAR_SIGNIFICANCE");
         assert!(names.contains(&"CLINVAR_SO_ACCESSION".to_string()));
         assert!(names.contains(&"GNOMAD_ALL_AF".to_string()) && names.contains(&"GNOMAD_REMAINING_AF".to_string()));
-        assert_eq!(names.len(), CLINVAR_FIELDS.len() + GNOMAD_FIELDS.len());
+        assert_eq!(names.len(), CLINVAR_CSQ_FIELDS.len() + GNOMAD_CSQ_FIELDS.len());
 
         let csq = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
         let tail: Vec<&str> = csq.split('|').skip(DEFAULT_CSQ_FIELDS.len()).collect();
@@ -3317,7 +3406,7 @@ mod tests {
         assert_eq!(tail[1], "criteria_provided&_multiple_submitters&_no_conflicts");
         assert_eq!(tail[3], "SNV");
         // gnomAD: ALL_AF first of its own block.
-        assert_eq!(tail[CLINVAR_FIELDS.len()], "0.00012");
+        assert_eq!(tail[CLINVAR_CSQ_FIELDS.len()], "0.00012");
         // A transcript with neither payload leaves every column empty.
         vf.transcript_variations[0].allele_annotations[0].supplementary.clear();
         let empty = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
@@ -3343,7 +3432,7 @@ mod tests {
             [
                 "OMIM_MIM_NUMBER", "OMIM_PHENOTYPES",
                 "GNOMAD_GENE_PLI", "GNOMAD_GENE_LOEUF", "GNOMAD_GENE_MIS_Z", "GNOMAD_GENE_SYN_Z",
-                "CLINVAR_PROTEIN_PROTEIN_VARIANTS",
+                "CLINVAR_PROTEIN_POS", "CLINVAR_PROTEIN_REF_AA", "CLINVAR_PROTEIN_ALT_AA", "CLINVAR_PROTEIN_SIGNIFICANCE",
             ]
         );
 
@@ -3357,7 +3446,7 @@ mod tests {
         assert_eq!(gene1[0], "113705");
         assert_eq!(gene1[1], "Breast_cancer&Ovarian&cancer");
         assert_eq!(&gene1[2..6], ["1.0", "0.03", "3.45", "0.12"]);
-        assert_eq!(gene1[6], "175:R>H:Pathogenic");
+        assert_eq!(&gene1[6..10], ["175", "R", "H", "Pathogenic"]);
         // The other gene has no record under its own symbol: every cell is empty.
         assert!(cells(entries[1]).iter().all(String::is_empty), "{}", entries[1]);
     }
@@ -3436,6 +3525,64 @@ mod tests {
 
         specs.set_vcf_prefix("MY_");
         assert!(ids(&specs).contains(&"MY_CLINVAR".to_string()));
+    }
+
+    #[test]
+    fn a_packed_column_becomes_one_csq_column_per_field_with_records_in_step() {
+        let mut vf = projection_test_variant();
+        let aa = &mut vf.transcript_variations[0].allele_annotations[0];
+        aa.supplementary.clear();
+        aa.supplementary.push((
+            "g2p".into(),
+            r#"[{"name":"A|G1|dis one|bi|strong","score":0.0},{"name":"B|G2|dis,two|mono|limited","score":0.0},{"name":"A|G1|dis one|bi|strong","score":0.0}]"#.into(),
+        ));
+        aa.supplementary.push(("rmsk".into(), r#"[{"name":"Satellite/centr/ALR/Alpha"}]"#.into()));
+        let part = |sep: &str, index, max| Some(SplitPart { sep: sep.into(), index, max });
+        let mut g2p = CsqExtra::new("g2p", vec!["name".into(), "name".into(), "name".into(), "score".into()]);
+        g2p.prefix = "G2P_".into();
+        g2p.labels = vec!["gene".into(), "disease".into(), "confidence".into(), "score".into()];
+        g2p.parts = vec![part("|", 0, 5), part("|", 2, 5), part("|", 4, 5), None];
+        let mut rmsk = CsqExtra::new("rmsk", vec!["name".into(), "name".into(), "name".into()]);
+        rmsk.prefix = "RM_".into();
+        rmsk.labels = vec!["class".into(), "family".into(), "name".into()];
+        rmsk.parts = vec![part("/", 0, 3), part("/", 1, 3), part("/", 2, 3)];
+        let extras = [g2p, rmsk];
+
+        let names = csq_extra_names(DEFAULT_CSQ_FIELDS, &extras);
+        assert_eq!(names, ["G2P_gene", "G2P_disease", "G2P_confidence", "G2P_score", "RM_class", "RM_family", "RM_name"]);
+        let csq = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
+        let cells: Vec<&str> = csq.split('|').skip(DEFAULT_CSQ_FIELDS.len()).collect();
+        // Two distinct records (the repeated one counts once); the n-th item of
+        // every column is the same record, and no value carries a `|`.
+        assert_eq!(&cells[..4], ["A&B", "dis%20one&dis%2Ctwo", "strong&limited", "0.0&0.0"]);
+        // The last field keeps any further `/`.
+        assert_eq!(&cells[4..], ["Satellite", "centr", "ALR%2FAlpha".replace("%2F", "/").as_str()]);
+    }
+
+    #[test]
+    fn clinvar_protein_records_go_one_part_per_column() {
+        let vf = projection_test_variant();
+        let extras = builtin_csq_extras(&[], &["clinvar_protein".to_string()]);
+        let names = csq_extra_names(DEFAULT_CSQ_FIELDS, &extras);
+        assert_eq!(
+            names,
+            ["CLINVAR_PROTEIN_POS", "CLINVAR_PROTEIN_REF_AA", "CLINVAR_PROTEIN_ALT_AA", "CLINVAR_PROTEIN_SIGNIFICANCE"]
+        );
+        let csq = format_csq_with_extra(&vf, DEFAULT_CSQ_FIELDS, &extras);
+        let cells: Vec<&str> = csq.split('|').skip(DEFAULT_CSQ_FIELDS.len()).collect();
+        assert_eq!(cells, ["175", "R", "H", "Pathogenic"]);
+    }
+
+    #[test]
+    fn clinvar_and_gnomad_csq_lists_cover_every_key_of_their_records() {
+        let extras = builtin_csq_extras(&["clinvar".to_string(), "gnomad".to_string()], &[]);
+        let keys = |k: &str| extras.iter().find(|e| e.json_key == k).unwrap().columns.clone();
+        for key in ["afTgp", "afEsp", "afExac"] {
+            assert!(keys("clinvar").contains(&key.to_string()), "{key}");
+        }
+        for key in ["allAcXY", "allAnXY", "faf95", "faf95Max", "filterAc0", "filterInbreeding", "filterVqsr", "lcr", "nonPar", "segdup"] {
+            assert!(keys("gnomad").contains(&key.to_string()), "{key}");
+        }
     }
 
     /// A variant carrying only user-supplied custom payloads, so nothing below
