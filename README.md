@@ -516,6 +516,8 @@ for the parsing rules and the escaping table.
 | `--proband` / `--mother` / `--father` | Sample names for trio analysis — enables PS2 (de novo), PM6, BP2 | -- |
 | `--gene-list` | Path to a gene-panel file (one symbol or Ensembl gene ID per line). Tab output drops rows whose transcript isn't on the panel. | -- |
 | `--explicit-alleles` | Add an explicit `REF` column to tab output after `Allele` | off |
+| `--no-fv-info` | VCF only. Leave out the `FV_*` INFO fields (header and records) of sources whose columns are already in the CSQ (ClinVar, gnomAD, OMIM, dbNSFP and the others listed by their database or by `<sa-dir>/csq_columns.json`). | off |
+| `--info-prefix` | VCF only. Prefix of the INFO fields added for supplementary sources, in place of `FV_`; `--info-prefix ""` gives `CLINVAR`, `GNOMAD`, ... (an input field with the same name is replaced). | `FV_` |
 | `--qc-rules` | TOML file of QC class rules; populates a `QC_CLASS` column in tab output | -- |
 
 ### `fastvep sa-build`

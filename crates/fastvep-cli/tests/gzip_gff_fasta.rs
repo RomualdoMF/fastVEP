@@ -42,6 +42,7 @@ fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 fn config(input: &Path, out: &Path) -> AnnotateConfig {
     AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input.to_string_lossy().into(),
         output: out.to_string_lossy().into(),
         gff3: vec![],
@@ -80,6 +81,7 @@ fn annotate(dir: &Path, gff3: &Path, fasta: &Path) -> String {
     let out = dir.join("out.vcf");
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         // A fixed label, so the SOURCE column does not change with the filename.
         gff3: vec![format!("Demo={}", gff3.display())],
         fasta: Some(fasta.to_string_lossy().into()),

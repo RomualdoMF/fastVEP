@@ -59,6 +59,7 @@ fn write_vcf(dir: &Path) -> PathBuf {
 fn config(input: &Path, out: &Path) -> AnnotateConfig {
     AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input.to_string_lossy().into(),
         output: out.to_string_lossy().into(),
         gff3: vec![],
@@ -96,6 +97,7 @@ fn a_truncated_explicit_transcript_cache_stops_the_run() {
     let out_ok = dir.path().join("ok.vcf");
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out_ok)
@@ -117,6 +119,7 @@ fn a_truncated_explicit_transcript_cache_stops_the_run() {
     let out_bad = dir.path().join("bad.vcf");
     let err = run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         transcript_cache: Some(truncated.to_string_lossy().into()),
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out_bad)
@@ -145,6 +148,7 @@ fn a_run_with_no_usable_transcript_source_stops_instead_of_calling_everything_in
 
     let err = run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out)
     })
@@ -180,6 +184,7 @@ fn a_sidecar_cache_that_will_not_load_is_rebuilt_from_the_gff3() {
     let out = dir.path().join("out.vcf");
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out)
@@ -237,6 +242,7 @@ fn a_pre_90_sidecar_cache_is_rebuilt_rather_than_trusted() {
     let out = dir.path().join("out.vcf");
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out)
@@ -300,6 +306,7 @@ fn a_pre_98_sidecar_cache_is_rebuilt_rather_than_trusted() {
     let out = dir.path().join("out.vcf");
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out)
@@ -345,6 +352,7 @@ fn a_pre_appris_sidecar_cache_is_rebuilt_rather_than_trusted() {
     let out = dir.path().join("out.vcf");
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         gff3: vec![gff3.to_string_lossy().into()],
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out)
@@ -373,6 +381,7 @@ fn a_pre_90_explicit_transcript_cache_stops_the_run() {
     let out = dir.path().join("out.vcf");
     let err = run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         transcript_cache: Some(stale.to_string_lossy().into()),
         fasta: Some(fasta.to_string_lossy().into()),
         ..config(&vcf, &out)

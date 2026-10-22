@@ -191,6 +191,12 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         no_fv_info: bool,
 
+        /// Prefix of the VCF INFO fields added for supplementary sources, in place
+        /// of `FV_` (`--info-prefix ""` gives `CLINVAR`, `GNOMAD`, ...). An input
+        /// field with the same name as one fastVEP writes is replaced by it.
+        #[arg(long, default_value = "FV_")]
+        info_prefix: String,
+
         /// Suppress periodic progress output
         #[arg(long, default_value_t = false)]
         no_progress: bool,
@@ -396,10 +402,12 @@ fn main() -> Result<()> {
             explicit_alleles,
             qc_rules,
             no_fv_info,
+            info_prefix,
             no_progress,
         } => {
             pipeline::run_annotate(pipeline::AnnotateConfig {
                 hide_fv_info: no_fv_info,
+                info_prefix,
                 input,
                 output,
                 gff3,

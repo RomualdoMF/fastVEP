@@ -37,6 +37,8 @@ use fastvep_annotate::{
 const BATCH_SIZE: usize = 1024;
 
 pub struct AnnotateConfig {
+    /// Prefix of the VCF INFO fields added for supplementary sources (`FV_` by default).
+    pub info_prefix: String,
     /// Leave out the `FV_*` VCF INFO fields of sources whose columns are in the CSQ.
     pub hide_fv_info: bool,
     pub input: String,
@@ -1534,6 +1536,7 @@ pub fn run_annotate(mut config: AnnotateConfig) -> Result<()> {
         }
     }
     csq_extras.sort_by(|a, b| a.json_key.cmp(&b.json_key));
+    supplementary_specs.set_vcf_prefix(&config.info_prefix);
     if config.hide_fv_info {
         let covered: Vec<String> = csq_extras.iter().map(|e| e.json_key.clone()).collect();
         supplementary_specs.hide_in_vcf(&covered);

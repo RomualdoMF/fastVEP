@@ -1071,16 +1071,22 @@ pub fn format_spliceai_info(vf: &VariationFeature) -> Option<String> {
 /// disagree, and the disagreement that matters is silent: an emitted `FV_*`
 /// field whose `##INFO=` header was never written is an invalid VCF that most
 /// readers accept anyway.
-pub fn vcf_owned_info_ids(specs: &LoadedSupplementarySpecs) -> Vec<&str> {
-    let mut ids = vec!["CSQ"];
+pub fn vcf_owned_info_ids(specs: &LoadedSupplementarySpecs) -> Vec<String> {
+    let mut ids: Vec<String> = vec!["CSQ".into()];
     if specs.spliceai {
-        ids.push("SpliceAI");
+        ids.push("SpliceAI".into());
     }
-    for spec in specs.loaded_specs() {
-        ids.push(spec.info_id);
-    }
-    for custom in &specs.custom {
-        ids.push(&custom.info_id);
+    // Both the `FV_` form and the configured one, so an old copy is replaced too.
+    let own = specs
+        .loaded_specs()
+        .map(|spec| spec.info_id.to_string())
+        .chain(specs.custom.iter().map(|c| c.info_id.clone()));
+    for id in own {
+        let renamed = specs.vcf_id(&id);
+        ids.push(id);
+        if !ids.contains(&renamed) {
+            ids.push(renamed);
+        }
     }
     ids
 }
@@ -1112,13 +1118,13 @@ pub fn vcf_info_header_lines_with_extra(
     for spec in specs.loaded_specs().filter(|s| !specs.vcf_hidden.contains(s.json_key)) {
         headers.push(format!(
             "##INFO=<ID={},Number=.,Type=String,Description=\"{}\">",
-            spec.info_id, spec.description
+            specs.vcf_id(spec.info_id), spec.description
         ));
     }
     for custom in specs.custom.iter().filter(|c| !specs.vcf_hidden.contains(&c.json_key)) {
         headers.push(format!(
             "##INFO=<ID={},Number=.,Type=String,Description=\"{}\">",
-            custom.info_id, custom.description
+            specs.vcf_id(&custom.info_id), custom.description
         ));
     }
     headers
@@ -1150,6 +1156,8 @@ pub struct LoadedSupplementarySpecs {
     /// `json_key`s whose `FV_*` field the VCF leaves out (their columns are in
     /// the CSQ). The ID is still owned, so a stale copy in the input is stripped.
     vcf_hidden: std::collections::HashSet<String>,
+    /// Replaces the leading `FV_` of every VCF INFO ID this struct produces.
+    vcf_prefix: String,
     /// Total number of extra tab columns (`spliceai` + number of `true`
     /// entries in `per_spec` + `custom`), cached at construction so the
     /// per-row hot path doesn't re-scan for the column count.
@@ -1236,7 +1244,25 @@ impl LoadedSupplementarySpecs {
             per_spec,
             custom,
             vcf_hidden: Default::default(),
+            vcf_prefix: "FV_".into(),
             column_count,
+        }
+    }
+
+    /// Write the VCF INFO IDs of the supplementary sources with `prefix` in place
+    /// of `FV_` (`""` gives `CLINVAR`, `GNOMAD`, ...). Tab output is not affected.
+    /// An ID that would not start with a letter or `_` gets a leading `_`.
+    pub fn set_vcf_prefix(&mut self, prefix: &str) {
+        self.vcf_prefix = prefix.to_string();
+    }
+
+    /// The VCF INFO ID for one of this struct's own `FV_`-prefixed IDs.
+    fn vcf_id(&self, id: &str) -> String {
+        let renamed = format!("{}{}", self.vcf_prefix, id.strip_prefix("FV_").unwrap_or(id));
+        if renamed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            renamed
+        } else {
+            format!("_{renamed}")
         }
     }
 
@@ -1373,7 +1399,7 @@ pub fn format_supplementary_vcf_info(
             VcfProjectionKind::ClinvarProtein => format_clinvar_protein_projection(vf, spec),
         };
         if let Some(value) = value {
-            projected.push((spec.info_id.to_string(), value));
+            projected.push((specs.vcf_id(spec.info_id), value));
         }
     }
 
@@ -1384,7 +1410,7 @@ pub fn format_supplementary_vcf_info(
             format_custom_allele_projection(vf, custom)
         };
         if let Some(value) = value {
-            projected.push((custom.info_id.clone(), value));
+            projected.push((specs.vcf_id(&custom.info_id), value));
         }
     }
 
@@ -3383,7 +3409,33 @@ mod tests {
         assert!(!header.contains("ID=FV_CLINVAR") && !header.contains("ID=FV_PANEL"), "{header}");
         assert!(header.contains("ID=FV_GNOMAD") && header.contains("ID=FV_DBSNP"));
         // Still owned: re-annotating a VCF that carries an old FV_CLINVAR strips it.
-        assert!(vcf_owned_info_ids(&specs).contains(&"FV_CLINVAR"));
+        assert!(vcf_owned_info_ids(&specs).contains(&"FV_CLINVAR".to_string()));
+    }
+
+    #[test]
+    fn the_vcf_info_prefix_can_be_replaced_or_dropped() {
+        let vf = projection_test_variant();
+        let keys = ["clinvar", "gnomad", "1000g"].map(String::from);
+        let ids = |specs: &LoadedSupplementarySpecs| -> Vec<String> {
+            format_supplementary_vcf_info(&vf, specs).into_iter().map(|(id, _)| id).collect()
+        };
+        let mut specs = LoadedSupplementarySpecs::new(&keys, &[]);
+        assert!(ids(&specs).contains(&"FV_CLINVAR".to_string()));
+
+        specs.set_vcf_prefix("");
+        let plain = ids(&specs);
+        assert!(plain.contains(&"CLINVAR".to_string()) && plain.contains(&"GNOMAD".to_string()), "{plain:?}");
+        assert!(plain.iter().all(|id| !id.starts_with("FV_")), "{plain:?}");
+        let header = vcf_info_header_lines(&specs, DEFAULT_CSQ_FIELDS, false).join("\n");
+        assert!(header.contains("ID=CLINVAR,") && header.contains("ID=GNOMAD,") && !header.contains("ID=FV_"), "{header}");
+        // `1000g` would start with a digit once the prefix is gone; an ID may not.
+        assert!(header.contains("ID=_1000G,") || header.contains("ID=_1KG,") || !header.contains("1000"), "{header}");
+        // An old `FV_` copy in the input is still replaced.
+        let owned = vcf_owned_info_ids(&specs);
+        assert!(owned.contains(&"FV_CLINVAR".to_string()) && owned.contains(&"CLINVAR".to_string()));
+
+        specs.set_vcf_prefix("MY_");
+        assert!(ids(&specs).contains(&"MY_CLINVAR".to_string()));
     }
 
     /// A variant carrying only user-supplied custom payloads, so nothing below
@@ -3500,7 +3552,7 @@ mod tests {
         let owned = vcf_owned_info_ids(&specs);
         for id in &declared {
             assert!(
-                owned.contains(&id.as_str()),
+                owned.contains(id),
                 "{id} is declared but not owned"
             );
         }
@@ -3608,14 +3660,14 @@ mod tests {
             &["gnomad_genes".to_string()],
         );
         let ids = vcf_owned_info_ids(&specs);
-        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len(), "duplicate INFO ID in {ids:?}");
-        assert!(ids.contains(&"FV_MY_PANEL"));
-        assert!(ids.contains(&"FV_MY_PANEL_2"));
-        assert!(ids.contains(&"FV_MY_PANEL_3"));
+        assert!(ids.contains(&"FV_MY_PANEL".to_string()));
+        assert!(ids.contains(&"FV_MY_PANEL_2".to_string()));
+        assert!(ids.contains(&"FV_MY_PANEL_3".to_string()));
         // The built-in keeps its ID; the custom source that wanted it yields.
-        assert!(ids.contains(&"FV_GNOMAD_GENE"));
-        assert!(ids.contains(&"FV_GNOMAD_GENE_2"));
+        assert!(ids.contains(&"FV_GNOMAD_GENE".to_string()));
+        assert!(ids.contains(&"FV_GNOMAD_GENE_2".to_string()));
     }
 
     #[test]

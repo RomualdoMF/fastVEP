@@ -78,6 +78,7 @@ fn annotate(dir: &Path, strand: char) -> String {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: vcf_in.to_string_lossy().into(),
         output: vcf_out.to_string_lossy().into(),
         gff3: vec![gff3_path.to_string_lossy().into()],

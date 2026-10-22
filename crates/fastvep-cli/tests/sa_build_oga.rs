@@ -259,6 +259,7 @@ fn annotate_vcf_emits_spliceai_from_fastsa() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -362,6 +363,7 @@ chr1\t26011\t2.71
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -444,6 +446,7 @@ fn annotate_vcf_replaces_existing_fastvep_info() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -515,6 +518,7 @@ fn annotate_vcf_emits_fastsa_projection_for_gnomad() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -585,6 +589,7 @@ fn annotate_tab_emits_fastsa_columns_for_clinvar_and_gnomad() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_tab.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -712,6 +717,7 @@ fn sa_only_vcf_omits_csq_and_default_pipeline() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![],
@@ -776,6 +782,7 @@ fn sa_only_tab_emits_minimal_columns() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_tab.to_string_lossy().into_owned(),
         gff3: vec![],
@@ -848,6 +855,7 @@ fn sa_only_json_omits_transcript_consequences() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_json.to_string_lossy().into_owned(),
         gff3: vec![],
@@ -948,6 +956,7 @@ fn sa_only_requires_sa_dir() {
 
     let err = run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![],
@@ -1019,6 +1028,7 @@ fn sa_only_multi_allelic_emits_per_alt_rows_with_independent_sa_columns() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_tab.to_string_lossy().into_owned(),
         gff3: vec![],
@@ -1098,6 +1108,7 @@ fn sa_only_strips_preexisting_csq_from_input_info() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![],
@@ -1171,6 +1182,7 @@ fn sa_only_strips_csq_when_in_middle_of_info_field() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![],
@@ -1268,6 +1280,7 @@ fn intergenic_variant_with_sa_dir_in_default_mode_emits_fv_clinvar() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_vcf.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -1331,6 +1344,7 @@ fn annotate_tab_gene_list_filters_to_panel_genes() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_tab.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -1386,6 +1400,7 @@ fn annotate_tab_explicit_alleles_inserts_ref_column() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_tab.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -1473,6 +1488,7 @@ min_dp = 8
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_tab.to_string_lossy().into_owned(),
         gff3: vec![gff3.to_string_lossy().into_owned()],
@@ -1548,6 +1564,7 @@ fn sa_only_does_not_declare_a_pick_column_for_the_switch_it_ignores() {
 
     run_annotate(AnnotateConfig {
         hide_fv_info: false,
+        info_prefix: "FV_".into(),
         input: input_vcf.to_string_lossy().into_owned(),
         output: output_tab.to_string_lossy().into_owned(),
         gff3: vec![],
