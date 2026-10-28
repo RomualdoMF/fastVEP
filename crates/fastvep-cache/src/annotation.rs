@@ -78,6 +78,13 @@ pub trait AnnotationProvider: Send + Sync {
         (false, false)
     }
 
+    /// What the database's key names: `ensembl`, `refseq`, `symbol` or `strand`
+    /// (empty when it is not keyed). A `strand` database is looked up with the
+    /// transcript's strand (`+` or `-`) in place of a gene.
+    fn key_type(&self) -> &str {
+        ""
+    }
+
     /// Annotation columns the VCF CSQ lists for this source, in input order
     /// (empty when the database does not list them). Each CSQ entry gets one
     /// column per name, filled from the record that matched the entry.
@@ -123,7 +130,8 @@ pub trait AnnotationProvider: Send + Sync {
 }
 
 /// Keyed lookup for one (transcript, allele): tries the gene ID, then the gene
-/// symbol (RefSeq-keyed databases often carry symbols), then gives up.
+/// symbol (RefSeq-keyed databases often carry symbols), then gives up. `strand` is
+/// the transcript's (`+` / `-`), used only by strand-keyed databases.
 pub fn annotate_keyed(
     sa: &dyn AnnotationProvider,
     chrom: &str,
@@ -133,7 +141,12 @@ pub fn annotate_keyed(
     gene_id: &str,
     gene_symbol: Option<&str>,
     transcript: &str,
+    strand: &str,
 ) -> Result<Option<AnnotationValue>> {
+    // A strand-keyed database (SpliceAI2) gives each transcript the row of its own strand.
+    if sa.key_type() == "strand" {
+        return sa.annotate_position_keyed(chrom, pos, ref_allele, alt_allele, Some(strand), None);
+    }
     let hit = sa.annotate_position_keyed(
         chrom,
         pos,
@@ -169,4 +182,21 @@ pub trait GeneAnnotationProvider: Send + Sync {
     ///
     /// Returns a JSON string if annotations exist, or `None`.
     fn annotate_gene(&self, gene_symbol: &str) -> Result<Option<String>>;
+
+    /// Whether records are filed under transcript IDs instead of gene symbols.
+    /// Such a source is looked up with [`annotate_transcript`](Self::annotate_transcript).
+    fn is_transcript_keyed(&self) -> bool {
+        false
+    }
+
+    /// Look up the record of a transcript (version ignored); only for
+    /// transcript-keyed sources.
+    fn annotate_transcript(&self, _transcript_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Record keys of a transcript-keyed source, one CSQ column each.
+    fn csq_columns(&self) -> &[String] {
+        &[]
+    }
 }

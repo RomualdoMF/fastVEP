@@ -697,6 +697,7 @@ fn annotate_variant(
                         &tv.gene_id,
                         tv.gene_symbol.as_deref(),
                         &tv.transcript_id,
+                        if tv.strand.as_int() >= 0 { "+" } else { "-" },
                     ) {
                         Ok(Some(ann)) => {
                             let json = match ann {
@@ -720,7 +721,7 @@ fn annotate_variant(
         for tv in &vf.transcript_variations {
             if let Some(gene_sym) = tv.gene_symbol.as_deref() {
                 if seen_genes.insert(gene_sym.to_string()) {
-                    for gp in gene_providers {
+                    for gp in gene_providers.iter().filter(|gp| !gp.is_transcript_keyed()) {
                         if let Ok(Some(json)) = gp.annotate_gene(gene_sym) {
                             vf.gene_annotations.push(fastvep_core::GeneAnnotation {
                                 gene_symbol: gene_sym.to_string(),
@@ -729,6 +730,28 @@ fn annotate_variant(
                             });
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Transcript-keyed gene-level sources: one record per transcript, filed under
+    // its ID without the version.
+    if gene_providers.iter().any(|gp| gp.is_transcript_keyed()) {
+        use fastvep_cache::annotation::GeneAnnotationProvider;
+        let mut seen = std::collections::HashSet::new();
+        for tv in &vf.transcript_variations {
+            let id = fastvep_sa::gene::strip_version(&tv.transcript_id).to_string();
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            for gp in gene_providers.iter().filter(|gp| gp.is_transcript_keyed()) {
+                if let Ok(Some(json)) = gp.annotate_transcript(&id) {
+                    vf.gene_annotations.push(fastvep_core::GeneAnnotation {
+                        gene_symbol: id.clone(),
+                        json_key: gp.json_key().to_string(),
+                        json_string: json,
+                    });
                 }
             }
         }
@@ -1524,10 +1547,20 @@ pub fn run_annotate(mut config: AnnotateConfig) -> Result<()> {
             }
         }
     }
+    // Transcript-keyed gene-level sources list their columns too; each CSQ entry
+    // takes the record of its own transcript.
+    for gp in gene_providers.iter().filter(|gp| gp.is_transcript_keyed()) {
+        let mut extra = output::CsqExtra::new(gp.json_key(), gp.csq_columns().to_vec());
+        extra.gene_level = true;
+        extra.by_transcript = true;
+        csq_extras.push(extra);
+    }
     // `<sa-dir>/csq_columns.json` describes the sources whose databases do not
     // list their columns, and trims or renames the columns of those that do.
     if let Some(dir) = config.sa_dir.as_deref() {
-        apply_csq_sidecar(Path::new(dir), &sa_json_keys, &mut csq_extras)?;
+        let mut loaded = sa_json_keys.clone();
+        loaded.extend(csq_extras.iter().filter(|e| e.by_transcript).map(|e| e.json_key.clone()));
+        apply_csq_sidecar(Path::new(dir), &loaded, &mut csq_extras)?;
     }
     // ClinVar and gnomAD have fixed field lists, written CLINVAR_* / GNOMAD_*.
     for builtin in output::builtin_csq_extras(&sa_json_keys, &gene_json_keys) {
@@ -2087,7 +2120,8 @@ fn enrich_compound_het_batch(
 /// }
 /// ```
 ///
-/// An entry with `columns` adds a source whose database does not list them: each
+/// An entry with `columns` adds a source whose database does not list them (a `prefix`
+/// alone renames the columns of one that does): each
 /// name is `prefix` + column, the column being the key looked up in the record
 /// (a source whose record is a bare number takes one column). `exclude` drops
 /// columns and `rename` changes the header name of columns of a source that is
@@ -2139,6 +2173,10 @@ fn apply_csq_sidecar(
             }
         };
         let extra = &mut extras[at];
+        // A prefix also applies to a source whose database lists its own columns.
+        if let Some(prefix) = entry.get("prefix").and_then(|p| p.as_str()) {
+            extra.prefix = prefix.to_string();
+        }
         // `labels` and `parts` parallel `columns`; start them as plain columns.
         if extra.labels.len() != extra.columns.len() {
             extra.labels = extra.columns.clone();

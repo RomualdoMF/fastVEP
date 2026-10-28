@@ -195,6 +195,67 @@ pub fn custom_tsv_columns<R: BufRead>(reader: R, info_fields: &[String]) -> Resu
     anyhow::bail!("custom TSV has no header line")
 }
 
+/// A TSV of per-transcript records (no position): the rows of `key_column` become
+/// the keys, the other columns (or `info_fields`) the JSON keys. A cell that is
+/// empty, `.` or `NA` is left out; the first row of a transcript wins and its ID
+/// is stored without the `.version`. Returns the stored column names and the records.
+pub fn parse_transcript_tsv<R: BufRead>(
+    reader: R,
+    key_column: &str,
+    info_fields: &[String],
+) -> Result<(Vec<String>, Vec<crate::common::GeneRecord>)> {
+    let mut lines = reader.lines();
+    let header = loop {
+        let line = lines.next().context("Transcript TSV has no header line")??;
+        if !line.trim().is_empty() && !line.starts_with("##") {
+            break line;
+        }
+    };
+    let names: Vec<String> = header
+        .trim_end_matches('\r')
+        .split('\t')
+        .map(|h| h.trim().trim_start_matches('#').to_string())
+        .collect();
+    let by_name = |name: &str| -> Result<usize> {
+        names
+            .iter()
+            .position(|n| n == name)
+            .with_context(|| format!("column '{name}' not found in the TSV header"))
+    };
+    let key = by_name(key_column)?;
+    let info: Vec<usize> = if info_fields.is_empty() {
+        (0..names.len()).filter(|&i| i != key).collect()
+    } else {
+        info_fields.iter().map(|f| by_name(f)).collect::<Result<_>>()?
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut records = Vec::new();
+    for line in lines {
+        let line = line.context("Reading transcript TSV")?;
+        let fields: Vec<&str> = line.trim_end_matches('\r').split('\t').collect();
+        let Some(id) = fields.get(key).map(|id| crate::gene::strip_version(id.trim())) else {
+            continue;
+        };
+        if id.is_empty() || id == "NA" || id == "." || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let mut json = String::new();
+        for &c in &info {
+            let value = fields.get(c).map_or("", |v| v.trim());
+            if is_missing(value) || value == "NA" {
+                continue;
+            }
+            push_sep(&mut json);
+            push_kv(&mut json, &names[c], value);
+        }
+        records.push(crate::common::GeneRecord {
+            gene_symbol: id.to_string(),
+            json: finish_object(json),
+        });
+    }
+    Ok((info.iter().map(|&c| names[c].clone()).collect(), records))
+}
+
 fn is_missing(v: &str) -> bool {
     v.is_empty() || v == "."
 }
@@ -470,5 +531,16 @@ mod tests {
         assert!(!custom_tsv_is_sorted(reopened.as_bytes(), &chroms()).unwrap());
         let backwards = "chr\tpos\tref\talt\n1\t9\tA\tG\n1\t5\tA\tG\n";
         assert!(!custom_tsv_is_sorted(backwards.as_bytes(), &chroms()).unwrap());
+    }
+
+    #[test]
+    fn transcript_tsv_keeps_both_id_formats_and_drops_missing_cells() {
+        let tsv = "transcript\tgene_flags\tlof.pLI\nENST1.2\tNA\t0.9\nNM_1.4\t[]\t.\nENST1.3\t[]\t0.1\n";
+        let (columns, records) = parse_transcript_tsv(tsv.as_bytes(), "transcript", &[]).unwrap();
+        assert_eq!(columns, ["gene_flags", "lof.pLI"]);
+        let by_id: Vec<(&str, &str)> = records.iter().map(|r| (r.gene_symbol.as_str(), r.json.as_str())).collect();
+        // The second ENST1 row is a duplicate once the version is gone.
+        assert_eq!(by_id, [("ENST1", r#"{"lof.pLI":"0.9"}"#), ("NM_1", r#"{"gene_flags":"[]"}"#)]);
+        assert!(parse_transcript_tsv(tsv.as_bytes(), "nope", &[]).is_err());
     }
 }

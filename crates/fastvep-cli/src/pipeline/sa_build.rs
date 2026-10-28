@@ -385,7 +385,7 @@ pub fn run_sa_build(
             is_positional: false,
         },
         _ => anyhow::bail!(
-            "Unknown source: {}. Supported: clinvar, gnomad, dbsnp, cosmic, onekg, topmed, mitomap, phylop, gerp, dann, revel, spliceai, primateai, dbnsfp, alphamissense, omim, gnomad_genes, clinvar_protein, custom_vcf, custom_tsv, custom_bed, custom",
+            "Unknown source: {}. Supported: clinvar, gnomad, dbsnp, cosmic, onekg, topmed, mitomap, phylop, gerp, dann, revel, spliceai, primateai, dbnsfp, alphamissense, omim, gnomad_genes, clinvar_protein, custom_vcf, custom_tsv, transcript_tsv, custom_bed, custom",
             source
         ),
     };
@@ -699,6 +699,17 @@ pub fn run_sa_build_format_keyed(
     keys: &SaBuildKeys,
     show_progress: bool,
 ) -> Result<()> {
+    if source == "transcript_tsv" {
+        let column = keys
+            .transcript
+            .as_deref()
+            .context("--source transcript_tsv needs --key-transcript <column with the transcript IDs>")?;
+        anyhow::ensure!(
+            chunk_bits.is_none() && keys.gene.is_none() && keys.key_type.is_none(),
+            "--source transcript_tsv takes only --key-transcript (no --chunk-bits, --key-gene, --key-type)"
+        );
+        return super::custom::run_transcript_tsv_build(input, output, assembly, name, column, info_fields);
+    }
     if chunk_bits.is_some() || keys.is_set() || keys.key_type.is_some() {
         anyhow::ensure!(
             source == "custom_tsv",
@@ -1080,7 +1091,7 @@ pub fn run_sa_build_v2_keyed(
                             Box::new(all.into_iter().map(Ok))
                         };
                     // Symbols such as AL627309.1 / AL627309.2 are different genes.
-                    if spec.key_type == "symbol" {
+                    if spec.key_type == "symbol" || spec.key_type == "strand" {
                         Box::new(fastvep_sa::keyed::Grouper::exact(rows))
                     } else {
                         Box::new(fastvep_sa::keyed::Grouper::new(rows))

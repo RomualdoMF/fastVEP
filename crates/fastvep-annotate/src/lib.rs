@@ -874,6 +874,7 @@ impl AnnotationContext {
                                 &tv.gene_id,
                                 tv.gene_symbol.as_deref(),
                                 &tv.transcript_id,
+                                if tv.strand.as_int() >= 0 { "+" } else { "-" },
                             ) {
                                 Ok(Some(ann)) => {
                                     let json = match ann {
@@ -897,7 +898,7 @@ impl AnnotationContext {
                 for tv in &vf.transcript_variations {
                     if let Some(gene_sym) = tv.gene_symbol.as_deref() {
                         if seen_genes.insert(gene_sym.to_string()) {
-                            for gp in &self.gene_providers {
+                            for gp in self.gene_providers.iter().filter(|gp| !gp.is_transcript_keyed()) {
                                 if let Ok(Some(json)) = gp.annotate_gene(gene_sym) {
                                     vf.gene_annotations.push(fastvep_core::GeneAnnotation {
                                         gene_symbol: gene_sym.to_string(),
@@ -906,6 +907,27 @@ impl AnnotationContext {
                                     });
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Transcript-keyed gene-level sources: one record per transcript ID.
+            use fastvep_cache::annotation::GeneAnnotationProvider;
+            if self.gene_providers.iter().any(|gp| gp.is_transcript_keyed()) {
+                let mut seen = std::collections::HashSet::new();
+                for tv in &vf.transcript_variations {
+                    let id = fastvep_sa::gene::strip_version(&tv.transcript_id).to_string();
+                    if !seen.insert(id.clone()) {
+                        continue;
+                    }
+                    for gp in self.gene_providers.iter().filter(|gp| gp.is_transcript_keyed()) {
+                        if let Ok(Some(json)) = gp.annotate_transcript(&id) {
+                            vf.gene_annotations.push(fastvep_core::GeneAnnotation {
+                                gene_symbol: id.clone(),
+                                json_key: gp.json_key().to_string(),
+                                json_string: json,
+                            });
                         }
                     }
                 }

@@ -251,8 +251,10 @@ enum Commands {
     SaBuild {
         /// Source type. Known sources (clinvar, gnomad, dbsnp, …) use their
         /// dedicated parsers; `custom_tsv` reads a header-named TSV into an `.osa2`
-        /// (with optional `--chunk-bits` and gene/transcript keys); `custom_vcf` and `custom_bed` accept any
-        /// well-formed VCF/BED file and produce a generic `.osa` or `.osi`
+        /// (with optional `--chunk-bits` and gene/transcript keys); `transcript_tsv`
+        /// reads a TSV with one row per transcript (`--key-transcript` names the ID
+        /// column) into a transcript-keyed `.oga`; `custom_vcf` and `custom_bed`
+        /// accept any well-formed VCF/BED file and produce a generic `.osa` or `.osi`
         /// keyed by `--name`. `custom` is an alias that auto-detects VCF vs
         /// BED from the input extension.
         #[arg(long)]
@@ -309,9 +311,10 @@ enum Commands {
         key_gene: Option<String>,
 
         /// ID namespace of the key columns: `ensembl` (default), `refseq`, or `symbol`
-        /// (gene names, compared exactly with no version suffix, for `--key-gene`).
+        /// (gene names, compared exactly with no version suffix, for `--key-gene`), or
+        /// `strand` (`+` / `-`, for `--key-gene`: each transcript gets the row of its strand).
         /// Checked against every ID and recorded in metadata.json.
-        #[arg(long, value_parser = ["ensembl", "refseq", "symbol"])]
+        #[arg(long, value_parser = ["ensembl", "refseq", "symbol", "strand"])]
         key_type: Option<String>,
 
         /// Suppress periodic progress output

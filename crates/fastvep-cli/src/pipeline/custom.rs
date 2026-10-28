@@ -271,6 +271,62 @@ pub fn run_oga_build(source: &str, input: &str, output: &str, assembly: &str) ->
     Ok(())
 }
 
+/// Build a transcript-keyed gene-level database (`.oga`) from a header-named TSV:
+/// `key_column` holds the transcript IDs (Ensembl `ENST…` and RefSeq `NM_…` alike,
+/// version ignored) and every other column becomes a key of the record.
+pub fn run_transcript_tsv_build(
+    input: &str,
+    output: &str,
+    assembly: &str,
+    name: Option<&str>,
+    key_column: &str,
+    info_fields: &[String],
+) -> Result<()> {
+    use fastvep_sa::common::SCHEMA_VERSION;
+    use fastvep_sa::gene::{GeneHeader, GeneIndex};
+
+    let name = resolve_custom_name(name, input);
+    anyhow::ensure!(
+        !matches!(name.as_str(), "omim" | "gnomad_genes" | "clinvar_protein"),
+        "--name '{name}' is the key of a built-in gene source the ACMG classifier reads; \
+         pick another name"
+    );
+    eprintln!("Building transcript_tsv .oga: {} -> {}.oga (name={})", input, output, name);
+
+    let file = File::open(input).with_context(|| format!("Opening input file: {}", input))?;
+    let reader: Box<dyn io::Read> = if input.ends_with(".gz") || input.ends_with(".bgz") {
+        Box::new(flate2::read::MultiGzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let (columns, records) =
+        fastvep_sa::custom_tsv::parse_transcript_tsv(io::BufReader::new(reader), key_column, info_fields)?;
+    anyhow::ensure!(!records.is_empty(), "no transcript rows found in {input}");
+
+    let header = GeneHeader {
+        schema_version: SCHEMA_VERSION,
+        json_key: name.clone(),
+        name: name.clone(),
+        version: "user-supplied".into(),
+        assembly: assembly.into(),
+    };
+    let mut index = GeneIndex::new_transcript_keyed(header, columns);
+    for record in records {
+        index.add(record);
+    }
+    let output_path = Path::new(output).with_extension("oga");
+    let mut out_file = File::create(&output_path)
+        .with_context(|| format!("Creating output file: {}", output_path.display()))?;
+    index.write_to(&mut out_file)?;
+    eprintln!(
+        "Wrote: {} ({} transcripts, {} columns)",
+        output_path.display(),
+        index.gene_count(),
+        index.columns.len()
+    );
+    Ok(())
+}
+
 // SA provider loading is now in fastvep-annotate::load_sa_providers.
 
 #[cfg(test)]

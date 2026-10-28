@@ -45,7 +45,7 @@ fn same_id(a: &str, b: &str) -> bool {
 
 /// Whether two keys name the same thing under `key_type`.
 fn same_key(key_type: &str, a: &str, b: &str) -> bool {
-    if key_type == "symbol" {
+    if key_type == "symbol" || key_type == "strand" {
         a.eq_ignore_ascii_case(b)
     } else {
         same_id(a, b)
@@ -53,13 +53,15 @@ fn same_key(key_type: &str, a: &str, b: &str) -> bool {
 }
 
 /// True when `id` looks like it belongs to `key_type`'s namespace. `symbol`
-/// accepts any non-empty name and is compared exactly (no version suffix:
+/// accepts any non-empty name and is compared exactly; `strand` accepts `+` / `-` (no version suffix:
 /// `AL627309.1` and `AL627309.2` are different genes).
 pub fn id_matches_type(id: &str, is_transcript: bool, key_type: &str) -> bool {
     let ensembl = id.starts_with("ENS");
     match key_type {
         // Gene symbols: any name will do.
         "symbol" => !id.is_empty(),
+        // A strand: `+` or `-`.
+        "strand" => id == "+" || id == "-",
         "ensembl" => ensembl,
         "refseq" if is_transcript => ["NM_", "NR_", "XM_", "XR_"]
             .iter()

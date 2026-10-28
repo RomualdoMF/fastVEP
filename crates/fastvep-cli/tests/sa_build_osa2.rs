@@ -1389,6 +1389,45 @@ fn keyed_custom_tsv_with_gene_symbols_keeps_dotted_names_apart() {
 }
 
 #[test]
+fn keyed_custom_tsv_by_strand_gives_each_strand_its_own_row() {
+    // SpliceAI2-style: no gene column, one row per strand of the gene scored.
+    let tsv = "chrom\tpos\tref\talt\tstrand\tscore\n\
+        chr1\t100\tA\tG\t+\t0.10\n\
+        chr1\t100\tA\tG\t-\t0.90\n\
+        chr1\t100\tA\tG\t-\t0.55\n\
+        chr1\t200\tC\tT\t-\t0.30\n";
+    let keys = SaBuildKeys {
+        gene: Some("strand".into()),
+        key_type: Some("strand".into()),
+        ..Default::default()
+    };
+    let r = tsv_build(tsv, "custom_tsv", "auto", Some(8), &keys).unwrap();
+    assert_eq!(r.key_type(), "strand");
+    let at = |s: &str| keyed_json(&r, Some(s), None);
+    assert!(at("+").unwrap().contains("\"score\":\"0.10\""));
+    // Two rows of the same strand: the first one is kept.
+    assert!(at("-").unwrap().contains("\"score\":\"0.90\""));
+    // A variant scored on one strand only leaves the other strand's transcripts empty.
+    let only_minus = r.annotate_position_keyed("chr1", 200, "C", "T", Some("+"), None).unwrap();
+    assert!(only_minus.is_none());
+    assert!(r.annotate_position_keyed("chr1", 200, "C", "T", Some("-"), None).unwrap().is_some());
+    // The stored columns include the strand, for the CSQ.
+    assert_eq!(r.csq_columns(), ["strand", "score"]);
+}
+
+#[test]
+fn a_strand_key_only_accepts_plus_and_minus() {
+    let tsv = "chrom\tpos\tref\talt\tstrand\tscore\nchr1\t100\tA\tG\tx\t0.1\n";
+    let keys = SaBuildKeys {
+        gene: Some("strand".into()),
+        key_type: Some("strand".into()),
+        ..Default::default()
+    };
+    let err = tsv_build(tsv, "custom_tsv", "auto", None, &keys).err().unwrap();
+    assert!(err.to_string().contains("not a strand ID"), "{err:#}");
+}
+
+#[test]
 fn keyed_custom_tsv_checks_key_type_and_columns() {
     let refseq = SaBuildKeys {
         key_type: Some("refseq".into()),

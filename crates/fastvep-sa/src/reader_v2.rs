@@ -749,6 +749,10 @@ impl AnnotationProvider for Osa2Reader {
         self.keys.as_ref().map_or((false, false), |k| (k.gene, k.transcript))
     }
 
+    fn key_type(&self) -> &str {
+        self.keys.as_ref().map_or("", |k| k.key_type.as_str())
+    }
+
     fn csq_columns(&self) -> &[String] {
         if !self.csq_columns.is_empty() {
             return &self.csq_columns;

@@ -8,6 +8,8 @@ pub const OSI_MAGIC: &[u8; 8] = b"FSTSI_01";
 
 /// Magic bytes for gene-level annotation files (.oga).
 pub const OGA_MAGIC: &[u8; 8] = b"FSTGA_01";
+/// Magic of an `.oga` whose records are filed under transcript IDs, not gene symbols.
+pub const OGA_TRANSCRIPT_MAGIC: &[u8; 8] = b"FSTGA_T1";
 
 /// Current schema version. Bump when the binary format changes.
 pub const SCHEMA_VERSION: u16 = 1;

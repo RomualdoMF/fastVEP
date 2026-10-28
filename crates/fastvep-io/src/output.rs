@@ -29,6 +29,9 @@ pub struct CsqExtra {
     /// A gene-level source (OMIM, gnomAD constraint, ClinVar protein): the record
     /// is the one filed under the entry's own gene symbol, not under its allele.
     pub gene_level: bool,
+    /// With `gene_level`: the record is filed under the entry's transcript ID
+    /// (version stripped), not its gene symbol.
+    pub by_transcript: bool,
     /// Parallel to `columns` (or empty): `Some` makes the column one field of a
     /// value that packs several, such as G2P's `gene|id|disease|...`.
     pub parts: Vec<Option<SplitPart>>,
@@ -61,6 +64,7 @@ impl CsqExtra {
             labels: Vec::new(),
             prefix: String::new(),
             gene_level: false,
+            by_transcript: false,
             parts: Vec::new(),
         }
     }
@@ -74,6 +78,7 @@ impl CsqExtra {
             labels: fields.iter().map(|(label, _)| label.to_string()).collect(),
             prefix: prefix.into(),
             gene_level: false,
+            by_transcript: false,
             parts: Vec::new(),
         }
     }
@@ -180,8 +185,13 @@ fn write_extra_columns(
 ) {
     for (at, extra) in extras.iter().enumerate() {
         if extra.gene_level {
-            // The record filed under this entry's own gene symbol, if any.
-            let values = tv.gene_symbol.as_deref().map(|symbol| {
+            // The record filed under this entry's own gene symbol (or transcript), if any.
+            let key = if extra.by_transcript {
+                Some(strip_transcript_version(&tv.transcript_id))
+            } else {
+                tv.gene_symbol.as_deref()
+            };
+            let values = key.map(|symbol| {
                 gene_cache
                     .entry((at, symbol.to_string()))
                     .or_insert_with(|| gene_column_values(vf, extra, symbol))
@@ -265,6 +275,14 @@ fn push_csq_value(value: &Value, buf: &mut String) {
             }
         }
         other => escape_csq_str(&other.to_string(), buf),
+    }
+}
+
+/// A transcript ID without its `.version` suffix.
+fn strip_transcript_version(id: &str) -> &str {
+    match id.rsplit_once('.') {
+        Some((base, v)) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => base,
+        _ => id,
     }
 }
 
